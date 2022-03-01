@@ -29,7 +29,7 @@ import (
 	"6.824/labrpc"
 )
 
-const DEBUGPRINTS = false
+const DEBUGPRINTS = true
 
 // global const, timeout range
 const LOW = 500
@@ -238,6 +238,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			return
 		}
 	}
+	reply.VoteGranted = false
 }
 
 //
@@ -316,7 +317,7 @@ func (rf *Raft) startElection() {
 	rf.votedFor = rf.me
 	total := len(rf.peers)
 	term := rf.currentTerm
-	id := rf.me
+	me := rf.me
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := rf.log[lastLogIndex].Term
 	rf.mu.Unlock()
@@ -329,13 +330,13 @@ func (rf *Raft) startElection() {
 	newTerm := Counter{}
 
 	for i := 0; i < total; i++ {
-		if i == id {
+		if i == me {
 			continue
 		}
 		// send RequestVote RPC
 		go func(rf *Raft, server int, win *Counter, lose *Counter, new *Counter) {
 			// initialize args and reply
-			args := RequestVoteArgs{term, id, lastLogIndex, lastLogTerm}
+			args := RequestVoteArgs{term, me, lastLogIndex, lastLogTerm}
 			reply := RequestVoteReply{}
 			// RPC call
 			ok := rf.sendRequestVote(server, &args, &reply)
@@ -375,7 +376,7 @@ func (rf *Raft) startElection() {
 		if winVotes.get() >= majority {
 			// becomes leader
 			if DEBUGPRINTS {
-				fmt.Printf("Server %d becomes the leader!\n", rf.me)
+				fmt.Printf("Server %d (T: %d) becomes the leader!\n", rf.me, rf.currentTerm)
 			}
 			rf.mu.Lock()
 			rf.leader = rf.me
@@ -498,7 +499,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := len(rf.log) // the expected index
 	rf.log = append(rf.log, &Entry{command, currentTerm})
 	if DEBUGPRINTS {
-		fmt.Printf("Leader %d receives command, now log: %v\n", rf.me, rf.log)
+		fmt.Printf("Leader %d (T: %d) receives command, now log:", rf.me, rf.currentTerm)
+		rf.printLog()
 	}
 	rf.mu.Unlock()
 	return index, currentTerm, isLeader
@@ -533,7 +535,6 @@ func (rf *Raft) heartbeat() {
 	total := len(rf.peers)
 	for !rf.killed() {
 		_, isleader := rf.GetState()
-		// if leader
 		if isleader {
 			rf.timer.reset()
 			for i := 0; i < total; i++ {
@@ -577,6 +578,13 @@ func (rf *Raft) sendHeartbeat(server int) {
 	// initialize RPC args and reply
 	args := AppendEntriesArgs{term, me, prevLogIndex, prevLogTerm, entries, leaderCommit}
 	reply := AppendEntriesReply{}
+
+	// check for leadership
+	_, isleader := rf.GetState()
+	if !isleader {
+		return
+	}
+
 	// call AppendEntriesArgs RPC
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
 	rf.mu.Lock()
@@ -593,7 +601,7 @@ func (rf *Raft) sendHeartbeat(server int) {
 		if reply.Success {
 			if DEBUGPRINTS {
 				if len(entries) != 0 {
-					fmt.Printf("Leader %d replicated with follower %d\n", rf.me, server)
+					fmt.Printf("Leader %d (T: %d) replicated with follower %d\n", rf.me, rf.currentTerm, server)
 				}
 			}
 			rf.matchIndex[server] = prevLogIndex + len(entries)
@@ -622,7 +630,7 @@ func (rf *Raft) updateCommit() {
 			}
 			if num >= majority {
 				if DEBUGPRINTS {
-					fmt.Printf("Leader %d views entry %d commitable\n", rf.me, n)
+					fmt.Printf("Leader %d (T: %d) views entry %d commitable\n", rf.me, rf.currentTerm, n)
 				}
 				mx = n
 			} else {
@@ -647,7 +655,8 @@ func (rf *Raft) applyEntries() {
 		applyMsg.Command = rf.log[rf.lastApplied].Command
 		applyMsg.CommandIndex = rf.lastApplied
 		if DEBUGPRINTS {
-			fmt.Printf("Server %d applied entry %d, now log: %v\n", rf.me, rf.lastApplied, rf.log)
+			fmt.Printf("Server %d (T: %d) applied entry %d, now log:", rf.me, rf.currentTerm, rf.lastApplied)
+			rf.printLog()
 		}
 		rf.applyCh <- applyMsg
 	}
@@ -655,14 +664,14 @@ func (rf *Raft) applyEntries() {
 }
 
 // method to print log for debugging
-// func (rf *Raft) printLog() {
-// 	if DEBUGPRINTS {
-// 		for i, entry := range rf.log {
-// 			fmt.Printf(" %d,%d ", i, entry.Term)
-// 		}
-// 		fmt.Printf("\n")
-// 	}
-// }
+func (rf *Raft) printLog() {
+	if DEBUGPRINTS {
+		for _, entry := range rf.log {
+			fmt.Printf(" (%d,%v) ", entry.Term, entry.Command)
+		}
+		fmt.Printf("\n")
+	}
+}
 
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
@@ -689,14 +698,12 @@ func (rf *Raft) ticker() {
 				rf.ResetTimeout()
 				if DEBUGPRINTS {
 					rf.mu.Lock()
-					fmt.Printf("Server %d (term %d) starts election, now log: %v\n", rf.me, rf.currentTerm, rf.log)
+					fmt.Printf("Server %d (T: %d) starts election, now log:", rf.me, rf.currentTerm)
+					rf.printLog()
 					rf.mu.Unlock()
 				}
 				rf.startElection()
 				// after an election, always reset the timer
-				if DEBUGPRINTS {
-					// fmt.Printf("Server %d's election ends!\n", rf.me)
-				}
 				rf.timer.reset()
 			}
 		}
