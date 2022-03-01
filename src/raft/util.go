@@ -1,13 +1,19 @@
 package raft
 
-import "log"
+import (
+	"fmt"
+	"time"
+)
 
 // Debugging
-const Debug = false
+const Debug = true
+
+var gStart time.Time
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
-		log.Printf(format, a...)
+		prefix := fmt.Sprintf("%06d ", time.Since(gStart).Milliseconds())
+		fmt.Printf(prefix+format, a...)
 	}
 	return
 }

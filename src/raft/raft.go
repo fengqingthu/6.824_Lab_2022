@@ -29,8 +29,6 @@ import (
 	"6.824/labrpc"
 )
 
-const DEBUGPRINTS = true
-
 // global const, timeout range
 const LOW = 500
 const HIGH = 1000
@@ -40,6 +38,9 @@ const HEARTBEAT = 100
 
 // global const, atomic unit
 const INTERVAL = 50
+
+// DPrint configs
+const PRINTCOMMAND = true
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -375,9 +376,7 @@ func (rf *Raft) startElection() {
 		// wins election
 		if winVotes.get() >= majority {
 			// becomes leader
-			if DEBUGPRINTS {
-				fmt.Printf("Server %d (T: %d) becomes the leader!\n", rf.me, rf.currentTerm)
-			}
+			DPrintf("Server %d (T: %d) becomes the leader!\n", rf.me, rf.currentTerm)
 			rf.mu.Lock()
 			rf.leader = rf.me
 			// initialize leader's state and send heartbeat
@@ -498,10 +497,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	index := len(rf.log) // the expected index
 	rf.log = append(rf.log, &Entry{command, currentTerm})
-	if DEBUGPRINTS {
-		fmt.Printf("Leader %d (T: %d) receives command, now log:", rf.me, rf.currentTerm)
-		rf.printLog()
-	}
+	DPrintf("Leader %d (T: %d) receives command, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 	rf.mu.Unlock()
 	return index, currentTerm, isLeader
 }
@@ -599,10 +595,8 @@ func (rf *Raft) sendHeartbeat(server int) {
 		}
 		// update nextIndex and matchIndex
 		if reply.Success {
-			if DEBUGPRINTS {
-				if len(entries) != 0 {
-					fmt.Printf("Leader %d (T: %d) replicated with follower %d\n", rf.me, rf.currentTerm, server)
-				}
+			if len(entries) != 0 {
+				DPrintf("Leader %d (T: %d) replicated with follower %d\n", rf.me, rf.currentTerm, server)
 			}
 			rf.matchIndex[server] = prevLogIndex + len(entries)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
@@ -629,9 +623,7 @@ func (rf *Raft) updateCommit() {
 				}
 			}
 			if num >= majority {
-				if DEBUGPRINTS {
-					fmt.Printf("Leader %d (T: %d) views entry %d commitable\n", rf.me, rf.currentTerm, n)
-				}
+				DPrintf("Leader %d (T: %d) views entry %d commitable\n", rf.me, rf.currentTerm, n)
 				mx = n
 			} else {
 				break
@@ -654,23 +646,25 @@ func (rf *Raft) applyEntries() {
 		applyMsg.CommandValid = true
 		applyMsg.Command = rf.log[rf.lastApplied].Command
 		applyMsg.CommandIndex = rf.lastApplied
-		if DEBUGPRINTS {
-			fmt.Printf("Server %d (T: %d) applied entry %d, now log:", rf.me, rf.currentTerm, rf.lastApplied)
-			rf.printLog()
-		}
+
+		DPrintf("Server %d (T: %d) applied entry %d, now log: "+rf.printLog(), rf.me, rf.currentTerm, rf.lastApplied)
 		rf.applyCh <- applyMsg
 	}
 	rf.mu.Unlock()
 }
 
-// method to print log for debugging
-func (rf *Raft) printLog() {
-	if DEBUGPRINTS {
-		for _, entry := range rf.log {
-			fmt.Printf(" (%d,%v) ", entry.Term, entry.Command)
+// method to fetch log content string for debugging
+func (rf *Raft) printLog() string {
+	content := ""
+	for _, entry := range rf.log {
+		if PRINTCOMMAND {
+			content += fmt.Sprintf(" (%d,%v) ", entry.Term, entry.Command)
+		} else {
+			content += fmt.Sprintf(" (%d) ", entry.Term)
 		}
-		fmt.Printf("\n")
 	}
+	content += "\n"
+	return content
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -690,18 +684,16 @@ func (rf *Raft) ticker() {
 			rf.timer.increment(INTERVAL)
 		}
 	}(rf)
+
 	// election timeout checker
 	for !rf.killed() {
 		_, isleader := rf.GetState()
 		if !isleader {
 			if rf.timer.get() > rf.timeout.get() {
 				rf.ResetTimeout()
-				if DEBUGPRINTS {
-					rf.mu.Lock()
-					fmt.Printf("Server %d (T: %d) starts election, now log:", rf.me, rf.currentTerm)
-					rf.printLog()
-					rf.mu.Unlock()
-				}
+				rf.mu.Lock()
+				DPrintf("Server %d (T: %d) starts election, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+				rf.mu.Unlock()
 				rf.startElection()
 				// after an election, always reset the timer
 				rf.timer.reset()
@@ -723,15 +715,18 @@ func (rf *Raft) ticker() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	// initialize global timestamp
+	if gStart.IsZero() {
+		gStart = time.Now()
+	}
+
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	if DEBUGPRINTS {
-		fmt.Printf("Server %d launched!\n", me)
-	}
+	DPrintf("Server %d launched!\n", me)
 	rf.applyCh = applyCh
 	rf.leader = -1
 	rf.votedFor = -1
