@@ -110,12 +110,11 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
-// re-randomized timeout and return the new timeout
-func (rf *Raft) ResetTimeout() int {
+// re-randomized timeout
+func (rf *Raft) ResetTimeout() {
 	ran := rand.Intn(HIGH-LOW) + LOW
 	rf.timeout.reset()
 	rf.timeout.increment(ran)
-	return ran
 }
 
 //
@@ -410,8 +409,10 @@ type AppendEntriesArgs struct {
 // AppendEntries RPC Reply structure
 //
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 //
@@ -438,14 +439,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// get state and match prevLog
+	// if log length does not match
 	lastLogIndex := len(rf.log) - 1
 	if lastLogIndex < args.PrevLogIndex {
 		reply.Success = false
+		reply.ConflictTerm = -1
+		reply.ConflictIndex = lastLogIndex
 		return
 	}
+	// if log term does not match
 	lastLogTerm := rf.log[args.PrevLogIndex].Term
 	if lastLogTerm != args.PrevLogTerm {
 		reply.Success = false
+		reply.ConflictTerm = lastLogTerm
+		// search for the first index whose entry has term equal to conflictTerm
+		for i := range rf.log {
+			if rf.log[i].Term == reply.ConflictTerm {
+				reply.ConflictIndex = i
+				break
+			}
+		}
 		return
 	}
 	// clip trailing entries
@@ -530,6 +543,7 @@ func (rf *Raft) heartbeat() {
 	for !rf.killed() {
 		_, isleader := rf.GetState()
 		if isleader {
+
 			rf.timer.reset()
 			// get state
 			rf.mu.Lock()
@@ -589,9 +603,9 @@ func (rf *Raft) sendAppendEntries(server int, lastLogIndex int, term int, leader
 
 	// call AppendEntriesArgs RPC
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if ok {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
 		if reply.Term > term {
 			// convert back to follower
 			rf.currentTerm = reply.Term
@@ -606,8 +620,32 @@ func (rf *Raft) sendAppendEntries(server int, lastLogIndex int, term int, leader
 			}
 			rf.matchIndex[server] = prevLogIndex + len(entries)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
-		} else { // kinda binary search
-			rf.nextIndex[server] = nextIndex / 2
+		} else {
+			// kinda binary search
+			// rf.nextIndex[server] = nextIndex / 2
+
+			// backtracking optimization
+			if reply.ConflictTerm == -1 {
+				rf.nextIndex[server] = reply.ConflictIndex
+				return
+			}
+			i := 0
+			for ; i < len(rf.log); i++ {
+				if rf.log[i].Term == reply.ConflictTerm {
+					break
+				}
+			}
+			if i == len(rf.log) {
+				rf.nextIndex[server] = reply.ConflictIndex
+			} else {
+				j := i
+				for ; j < len(rf.log); j++ {
+					if rf.log[j].Term != reply.ConflictTerm {
+						break
+					}
+				}
+				rf.nextIndex[server] = j
+			}
 		}
 	}
 }
@@ -683,12 +721,12 @@ func (rf *Raft) ticker() {
 	rf.ResetTimeout()
 
 	// timer goroutine
-	go func(rf *Raft) {
+	go func(timer *Counter) {
 		for !rf.killed() {
 			time.Sleep(INTERVAL * time.Millisecond)
-			rf.timer.increment(INTERVAL)
+			timer.increment(INTERVAL)
 		}
-	}(rf)
+	}(rf.timer)
 
 	// election timeout checker
 	for !rf.killed() {
