@@ -38,6 +38,7 @@ const HEARTBEAT = 100
 
 // global const, atomic unit
 const INTERVAL = 50
+const TIMERUNIT = 10
 
 // DPrint configs
 const PRINTCOMMAND = false
@@ -112,9 +113,8 @@ func (rf *Raft) GetState() (int, bool) {
 
 // re-randomized timeout
 func (rf *Raft) ResetTimeout() {
-	ran := rand.Intn(HIGH-LOW) + LOW
 	rf.timeout.reset()
-	rf.timeout.increment(ran)
+	rf.timeout.increment(rand.Intn(HIGH-LOW) + LOW)
 }
 
 //
@@ -327,14 +327,21 @@ func (rf *Raft) startElection() {
 	winVotes := Counter{}
 	winVotes.num = 1 // vote for itself
 	loseVotes := Counter{}
-	newTerm := Counter{}
 
 	for i := 0; i < total; i++ {
 		if i == me {
 			continue
 		}
+		// check for candidate state
+		rf.mu.Lock()
+		leader := rf.leader
+		votedFor := rf.votedFor
+		rf.mu.Unlock()
+		if leader != -1 || votedFor != me {
+			return
+		}
 		// send RequestVote RPC
-		go func(rf *Raft, server int, win *Counter, lose *Counter, new *Counter) {
+		go func(rf *Raft, server int, win *Counter, lose *Counter) {
 			// initialize args and reply
 			args := RequestVoteArgs{term, me, lastLogIndex, lastLogTerm}
 			reply := RequestVoteReply{}
@@ -348,7 +355,6 @@ func (rf *Raft) startElection() {
 					rf.votedFor = -1
 					rf.leader = -1
 					rf.mu.Unlock()
-					new.increment(1)
 				}
 				if reply.VoteGranted {
 					win.increment(1)
@@ -356,40 +362,27 @@ func (rf *Raft) startElection() {
 					lose.increment(1)
 				}
 			}
-		}(rf, i, &winVotes, &loseVotes, &newTerm)
-	}
-
-	// check if election should end
-	for {
-		// lose the election or timeout
-		if newTerm.get() > 0 || loseVotes.get() >= majority || rf.timer.get() > rf.timeout.get() {
-			// convert to follower
-			return
-		}
-		// hear other leader
-		rf.mu.Lock()
-		leader := rf.leader
-		rf.mu.Unlock()
-		if leader > 0 && leader != rf.me {
-			return
-		}
-		// wins election
-		if winVotes.get() >= majority {
-			// becomes leader
-			DPrintf("Server %d (T: %d) becomes the leader!\n", rf.me, rf.currentTerm)
-			rf.mu.Lock()
-			rf.leader = rf.me
-			// initialize leader's state and send heartbeat
-			rf.nextIndex = []int{}
-			rf.matchIndex = []int{}
-			for i := 0; i < total; i++ {
-				rf.nextIndex = append(rf.nextIndex, len(rf.log))
-				rf.matchIndex = append(rf.matchIndex, 0)
+			if win.get() >= majority {
+				// becomes leader
+				DPrintf("Server %d (T: %d) becomes the leader!\n", rf.me, rf.currentTerm)
+				rf.mu.Lock()
+				rf.leader = rf.me
+				// initialize leader's state and send heartbeat
+				for i := 0; i < total; i++ {
+					rf.nextIndex[i] = len(rf.log)
+					rf.matchIndex[i] = 0
+				}
+				rf.mu.Unlock()
+				return
 			}
-			rf.mu.Unlock()
-			return
-		}
-		time.Sleep(INTERVAL * time.Millisecond)
+			if lose.get() >= majority {
+				// convert to follower
+				rf.mu.Lock()
+				rf.votedFor = -1
+				rf.mu.Unlock()
+				return
+			}
+		}(rf, i, &winVotes, &loseVotes)
 	}
 }
 
@@ -722,9 +715,12 @@ func (rf *Raft) ticker() {
 
 	// timer goroutine
 	go func(timer *Counter) {
+		lastTime := time.Now()
 		for !rf.killed() {
-			time.Sleep(INTERVAL * time.Millisecond)
-			timer.increment(INTERVAL)
+			time.Sleep(TIMERUNIT * time.Millisecond)
+			h := int(time.Since(lastTime).Milliseconds())
+			lastTime = time.Now()
+			timer.increment(h)
 		}
 	}(rf.timer)
 
@@ -738,8 +734,6 @@ func (rf *Raft) ticker() {
 				DPrintf("Server %d (T: %d) starts election, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 				rf.mu.Unlock()
 				rf.startElection()
-				// after an election, always reset the timer
-				rf.timer.reset()
 			}
 		}
 		time.Sleep(INTERVAL * time.Millisecond)
@@ -778,6 +772,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = append(rf.log, &Entry{nil, 0})
 	rf.timer = &Counter{}
 	rf.timeout = &Counter{}
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
