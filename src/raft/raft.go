@@ -537,7 +537,6 @@ func (rf *Raft) heartbeat() {
 		_, isleader := rf.GetState()
 		if isleader {
 
-			rf.timer.reset()
 			// get state
 			rf.mu.Lock()
 			term := rf.currentTerm
@@ -545,16 +544,11 @@ func (rf *Raft) heartbeat() {
 			lastLogIndex := len(rf.log) - 1
 			nextIndex := rf.nextIndex
 			// initialize prevLog info
-			prevLogIndex := []int{}
-			prevLogTerm := []int{}
+			prevLogIndex := make([]int, total)
+			prevLogTerm := make([]int, total)
 			for i := 0; i < total; i++ {
-				if i == me {
-					prevLogIndex = append(prevLogIndex, 0)
-					prevLogTerm = append(prevLogTerm, 0)
-				} else {
-					prevLogIndex = append(prevLogIndex, nextIndex[i]-1)
-					prevLogTerm = append(prevLogTerm, rf.log[prevLogIndex[i]].Term)
-				}
+				prevLogIndex[i] = nextIndex[i] - 1
+				prevLogTerm[i] = rf.log[prevLogIndex[i]].Term
 			}
 			rf.mu.Unlock()
 			for i := 0; i < total; i++ {
@@ -615,30 +609,30 @@ func (rf *Raft) sendAppendEntries(server int, lastLogIndex int, term int, leader
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
 		} else {
 			// kinda binary search
-			// rf.nextIndex[server] = nextIndex / 2
+			rf.nextIndex[server] = nextIndex / 2
 
 			// backtracking optimization
-			if reply.ConflictTerm == -1 {
-				rf.nextIndex[server] = reply.ConflictIndex
-				return
-			}
-			i := 0
-			for ; i < len(rf.log); i++ {
-				if rf.log[i].Term == reply.ConflictTerm {
-					break
-				}
-			}
-			if i == len(rf.log) {
-				rf.nextIndex[server] = reply.ConflictIndex
-			} else {
-				j := i
-				for ; j < len(rf.log); j++ {
-					if rf.log[j].Term != reply.ConflictTerm {
-						break
-					}
-				}
-				rf.nextIndex[server] = j
-			}
+			// if reply.ConflictTerm == -1 {
+			// 	rf.nextIndex[server] = reply.ConflictIndex
+			// 	return
+			// }
+			// i := 0
+			// for ; i < len(rf.log); i++ {
+			// 	if rf.log[i].Term == reply.ConflictTerm {
+			// 		break
+			// 	}
+			// }
+			// if i == len(rf.log) {
+			// 	rf.nextIndex[server] = reply.ConflictIndex
+			// } else {
+			// 	j := i
+			// 	for ; j < len(rf.log); j++ {
+			// 		if rf.log[j].Term != reply.ConflictTerm {
+			// 			break
+			// 		}
+			// 	}
+			// 	rf.nextIndex[server] = j
+			// }
 		}
 	}
 }
@@ -718,9 +712,8 @@ func (rf *Raft) ticker() {
 		lastTime := time.Now()
 		for !rf.killed() {
 			time.Sleep(TIMERUNIT * time.Millisecond)
-			h := int(time.Since(lastTime).Milliseconds())
+			timer.increment(int(time.Since(lastTime).Milliseconds()))
 			lastTime = time.Now()
-			timer.increment(h)
 		}
 	}(rf.timer)
 
