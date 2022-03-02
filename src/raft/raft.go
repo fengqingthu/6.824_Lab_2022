@@ -40,7 +40,7 @@ const HEARTBEAT = 100
 const INTERVAL = 50
 
 // DPrint configs
-const PRINTCOMMAND = true
+const PRINTCOMMAND = false
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -359,10 +359,11 @@ func (rf *Raft) startElection() {
 			}
 		}(rf, i, &winVotes, &loseVotes, &newTerm)
 	}
+
 	// check if election should end
 	for {
-		// lose the election
-		if newTerm.get() > 0 || loseVotes.get() >= majority {
+		// lose the election or timeout
+		if newTerm.get() > 0 || loseVotes.get() >= majority || rf.timer.get() > rf.timeout.get() {
 			// convert to follower
 			return
 		}
@@ -389,10 +390,7 @@ func (rf *Raft) startElection() {
 			rf.mu.Unlock()
 			return
 		}
-		// split votes: all votes collected or timeout but no result
-		if loseVotes.get()+winVotes.get() == total || rf.timer.get() > rf.timeout.get() {
-			return
-		}
+		time.Sleep(INTERVAL * time.Millisecond)
 	}
 }
 
@@ -533,12 +531,30 @@ func (rf *Raft) heartbeat() {
 		_, isleader := rf.GetState()
 		if isleader {
 			rf.timer.reset()
+			// get state
+			rf.mu.Lock()
+			term := rf.currentTerm
+			leaderCommit := rf.commitIndex
+			lastLogIndex := len(rf.log) - 1
+			nextIndex := rf.nextIndex
+			// initialize prevLog info
+			prevLogIndex := []int{}
+			prevLogTerm := []int{}
 			for i := 0; i < total; i++ {
 				if i == me {
-					continue
+					prevLogIndex = append(prevLogIndex, 0)
+					prevLogTerm = append(prevLogTerm, 0)
+				} else {
+					prevLogIndex = append(prevLogIndex, nextIndex[i]-1)
+					prevLogTerm = append(prevLogTerm, rf.log[prevLogIndex[i]].Term)
 				}
-				// send heatbeat
-				go rf.sendHeartbeat(i)
+			}
+			rf.mu.Unlock()
+			for i := 0; i < total; i++ {
+				if i != me {
+					// send heatbeat in parallel
+					go rf.sendAppendEntries(i, lastLogIndex, term, me, prevLogIndex[i], prevLogTerm[i], nextIndex[i], leaderCommit)
+				}
 			}
 			// check for commitable entries
 			go rf.updateCommit()
@@ -552,17 +568,7 @@ func (rf *Raft) heartbeat() {
 //
 // the method to send heartbeat to given follower
 //
-func (rf *Raft) sendHeartbeat(server int) {
-	// get state
-	rf.mu.Lock()
-	term := rf.currentTerm
-	me := rf.me
-	lastLogIndex := len(rf.log) - 1
-	nextIndex := rf.nextIndex[server]
-	prevLogIndex := nextIndex - 1
-	prevLogTerm := rf.log[prevLogIndex].Term
-	leaderCommit := rf.commitIndex
-	rf.mu.Unlock()
+func (rf *Raft) sendAppendEntries(server int, lastLogIndex int, term int, leaderId int, prevLogIndex int, prevLogTerm int, nextIndex int, leaderCommit int) {
 
 	entries := []*Entry{} // initialized as empty
 	if lastLogIndex >= nextIndex {
@@ -572,7 +578,7 @@ func (rf *Raft) sendHeartbeat(server int) {
 	}
 
 	// initialize RPC args and reply
-	args := AppendEntriesArgs{term, me, prevLogIndex, prevLogTerm, entries, leaderCommit}
+	args := AppendEntriesArgs{term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit}
 	reply := AppendEntriesReply{}
 
 	// check for leadership
@@ -588,8 +594,8 @@ func (rf *Raft) sendHeartbeat(server int) {
 	if ok {
 		if reply.Term > term {
 			// convert back to follower
-			rf.leader = -1
 			rf.currentTerm = reply.Term
+			rf.leader = -1
 			rf.votedFor = -1
 			return
 		}
@@ -611,10 +617,11 @@ func (rf *Raft) sendHeartbeat(server int) {
 //
 func (rf *Raft) updateCommit() {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	total := len(rf.peers)
 	majority := total/2 + 1
 	mx := rf.commitIndex
-	for n := rf.commitIndex + 1; n < len(rf.log); n++ {
+	for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
 		if rf.log[n].Term == rf.currentTerm {
 			num := 1 // leader itself
 			for i := 0; i < total; i++ {
@@ -623,15 +630,13 @@ func (rf *Raft) updateCommit() {
 				}
 			}
 			if num >= majority {
-				DPrintf("Leader %d (T: %d) views entry %d commitable\n", rf.me, rf.currentTerm, n)
+				DPrintf("Leader %d (T: %d) views entries till %d commitable\n", rf.me, rf.currentTerm, n)
 				mx = n
-			} else {
 				break
 			}
 		}
 	}
 	rf.commitIndex = mx
-	rf.mu.Unlock()
 }
 
 //
@@ -639,6 +644,7 @@ func (rf *Raft) updateCommit() {
 //
 func (rf *Raft) applyEntries() {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	for rf.lastApplied < rf.commitIndex {
 		rf.lastApplied++
 		// apply
@@ -650,7 +656,6 @@ func (rf *Raft) applyEntries() {
 		DPrintf("Server %d (T: %d) applied entry %d, now log: "+rf.printLog(), rf.me, rf.currentTerm, rf.lastApplied)
 		rf.applyCh <- applyMsg
 	}
-	rf.mu.Unlock()
 }
 
 // method to fetch log content string for debugging
@@ -658,9 +663,9 @@ func (rf *Raft) printLog() string {
 	content := ""
 	for _, entry := range rf.log {
 		if PRINTCOMMAND {
-			content += fmt.Sprintf(" (%d,%v) ", entry.Term, entry.Command)
+			content += fmt.Sprintf("%d,%v ", entry.Term, entry.Command)
 		} else {
-			content += fmt.Sprintf(" (%d) ", entry.Term)
+			content += fmt.Sprintf("%d ", entry.Term)
 		}
 	}
 	content += "\n"
@@ -699,6 +704,7 @@ func (rf *Raft) ticker() {
 				rf.timer.reset()
 			}
 		}
+		time.Sleep(INTERVAL * time.Millisecond)
 	}
 }
 

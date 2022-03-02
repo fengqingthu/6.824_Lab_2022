@@ -6,7 +6,7 @@ import (
 )
 
 // Debugging
-const Debug = true
+const Debug = false
 
 var gStart time.Time
 
