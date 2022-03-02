@@ -324,24 +324,28 @@ func (rf *Raft) startElection() {
 
 	// instead of wait group, can use counters with lock, or a channel
 	majority := total/2 + 1
-	winVotes := Counter{}
-	winVotes.num = 1 // vote for itself
+	winVotes := Counter{num: 1} // vote for itself
 	loseVotes := Counter{}
+	celebrates := Counter{} // the number of goroutines celebrating winning leadership
 
 	for i := 0; i < total; i++ {
 		if i == me {
 			continue
 		}
-		// check for candidate state
-		rf.mu.Lock()
-		leader := rf.leader
-		votedFor := rf.votedFor
-		rf.mu.Unlock()
-		if leader != -1 || votedFor != me {
-			return
-		}
-		// send RequestVote RPC
-		go func(rf *Raft, server int, win *Counter, lose *Counter) {
+		// send RequestVote RPC in parallel
+		go func(rf *Raft, server int, win *Counter, lose *Counter, celebrate *Counter) {
+			// check if election already ends
+			if celebrate.get() > 0 {
+				return
+			}
+			// check for candidate state
+			rf.mu.Lock()
+			leader := rf.leader
+			votedFor := rf.votedFor
+			rf.mu.Unlock()
+			if leader != -1 || votedFor != me {
+				return
+			}
 			// initialize args and reply
 			args := RequestVoteArgs{term, me, lastLogIndex, lastLogTerm}
 			reply := RequestVoteReply{}
@@ -361,28 +365,33 @@ func (rf *Raft) startElection() {
 				} else {
 					lose.increment(1)
 				}
-			}
-			if win.get() >= majority {
-				// becomes leader
-				DPrintf("Server %d (T: %d) becomes the leader!\n", rf.me, rf.currentTerm)
-				rf.mu.Lock()
-				rf.leader = rf.me
-				// initialize leader's state and send heartbeat
-				for i := 0; i < total; i++ {
-					rf.nextIndex[i] = len(rf.log)
-					rf.matchIndex[i] = 0
+				// wins the election
+				if winVotes.get() >= majority && celebrate.get() < 1 {
+					// becomes leader
+					celebrate.increment(1)
+					DPrintf("Server %d (T: %d) becomes the leader!\n", rf.me, rf.currentTerm)
+					rf.mu.Lock()
+					rf.leader = rf.me
+					// initialize leader's state and send heartbeat
+					for i := 0; i < total; i++ {
+						rf.nextIndex[i] = len(rf.log)
+						rf.matchIndex[i] = 0
+					}
+					rf.mu.Unlock()
+					// start heartbeat goroutine
+					go rf.heartbeat()
+					return
 				}
-				rf.mu.Unlock()
-				return
+				// lose the election or timeout
+				if loseVotes.get() >= majority {
+					// convert to follower
+					rf.mu.Lock()
+					rf.votedFor = -1
+					rf.mu.Unlock()
+					return
+				}
 			}
-			if lose.get() >= majority {
-				// convert to follower
-				rf.mu.Lock()
-				rf.votedFor = -1
-				rf.mu.Unlock()
-				return
-			}
-		}(rf, i, &winVotes, &loseVotes)
+		}(rf, i, &winVotes, &loseVotes, &celebrates)
 	}
 }
 
@@ -412,6 +421,11 @@ type AppendEntriesReply struct {
 // AppendEntries RPC Handler
 //
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// follower applies entries when receiving heartbeat
+	defer func() {
+		go rf.applyEntries()
+	}()
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// get term and assign to reply
@@ -528,7 +542,7 @@ func (rf *Raft) killed() bool {
 }
 
 //
-// the long-running goroutine for heartbeat
+// the long-running goroutine of heartbeat for the leader
 //
 func (rf *Raft) heartbeat() {
 	me := rf.me
@@ -559,9 +573,12 @@ func (rf *Raft) heartbeat() {
 			}
 			// check for commitable entries
 			go rf.updateCommit()
+			// apply entries
+			go rf.applyEntries()
+		} else {
+			// ends if no longer leader
+			return
 		}
-		// all servers need to apply entries
-		go rf.applyEntries()
 		time.Sleep(HEARTBEAT * time.Millisecond)
 	}
 }
@@ -727,6 +744,8 @@ func (rf *Raft) ticker() {
 				DPrintf("Server %d (T: %d) starts election, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 				rf.mu.Unlock()
 				rf.startElection()
+				// reset the timer after an election
+				// rf.timer.reset()
 			}
 		}
 		time.Sleep(INTERVAL * time.Millisecond)
@@ -772,6 +791,5 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start background goroutines to start elections
 	go rf.ticker()
-	go rf.heartbeat()
 	return rf
 }
