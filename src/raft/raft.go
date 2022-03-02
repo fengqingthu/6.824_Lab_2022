@@ -402,10 +402,10 @@ type AppendEntriesArgs struct {
 // AppendEntries RPC Reply structure
 //
 type AppendEntriesReply struct {
-	Term          int
-	Success       bool
-	ConflictIndex int
-	ConflictTerm  int
+	Term    int
+	Success bool
+	// ConflictIndex int
+	// ConflictTerm  int
 }
 
 //
@@ -436,22 +436,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	lastLogIndex := len(rf.log) - 1
 	if lastLogIndex < args.PrevLogIndex {
 		reply.Success = false
-		reply.ConflictTerm = -1
-		reply.ConflictIndex = lastLogIndex
+		// reply.ConflictTerm = -1
+		// reply.ConflictIndex = lastLogIndex
 		return
 	}
 	// if log term does not match
 	lastLogTerm := rf.log[args.PrevLogIndex].Term
 	if lastLogTerm != args.PrevLogTerm {
 		reply.Success = false
-		reply.ConflictTerm = lastLogTerm
-		// search for the first index whose entry has term equal to conflictTerm
-		for i := range rf.log {
-			if rf.log[i].Term == reply.ConflictTerm {
-				reply.ConflictIndex = i
-				break
-			}
-		}
+		// reply.ConflictTerm = lastLogTerm
+		// // search for the first index whose entry has term equal to conflictTerm
+		// for i := range rf.log {
+		// 	if rf.log[i].Term == reply.ConflictTerm {
+		// 		reply.ConflictIndex = i
+		// 		break
+		// 	}
+		// }
 		return
 	}
 	// clip trailing entries
