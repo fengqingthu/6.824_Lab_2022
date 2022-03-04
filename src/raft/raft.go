@@ -235,19 +235,17 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	currentTerm := rf.currentTerm
-	rf.mu.Unlock()
 	reply.Term = currentTerm
 
 	if args.Term > currentTerm {
 		// update term and convert to follower
-		rf.mu.Lock()
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.leader = -1
-		rf.mu.Unlock()
 
 		go rf.persist()
 	}
@@ -259,11 +257,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// larger or equal terms, get state to compare log
-	rf.mu.Lock()
 	votedFor := rf.votedFor
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := rf.log[lastLogIndex].Term
-	rf.mu.Unlock()
 
 	if votedFor < 0 || votedFor == args.CandidateId {
 		if lastLogTerm > args.LastLogTerm {
@@ -272,9 +268,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 		if lastLogTerm < args.LastLogTerm || lastLogIndex <= args.LastLogIndex {
 			// grant vote
-			rf.mu.Lock()
 			rf.votedFor = args.CandidateId
-			rf.mu.Unlock()
 
 			go rf.persist()
 
@@ -484,19 +478,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		go rf.applyEntries()
 	}()
 
-	// get term and assign to reply
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// get term and assign to reply
 	currentTerm := rf.currentTerm
-	rf.mu.Unlock()
 	reply.Term = currentTerm
 
 	// from higher term: update term and convert to follower
 	if args.Term > currentTerm {
-		rf.mu.Lock()
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.leader = -1
-		rf.mu.Unlock()
 
 		go rf.persist()
 	}
@@ -509,43 +502,41 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// get state and match prevLog
 	// if log length does not match
-	rf.mu.Lock()
 	lastLogIndex := len(rf.log) - 1
-	rf.mu.Unlock()
 	if lastLogIndex < args.PrevLogIndex {
 		reply.Success = false
 		return
 	}
 	// if log term does not match
-	rf.mu.Lock()
 	prevLogTerm := rf.log[args.PrevLogIndex].Term
-	rf.mu.Unlock()
 	if prevLogTerm != args.PrevLogTerm {
 		reply.Success = false
 		return
 	}
+
 	// compare leader' entries with existing entries
-	rf.mu.Lock()
 	i := args.PrevLogIndex + 1
 	j := 0
-	if lastLogIndex > args.PrevLogIndex {
-		for i <= lastLogIndex && j < len(args.Entries) {
-			if rf.log[i].Term != args.Entries[j].Term {
-				break
-			}
-			i++
-			j++
+	for i <= lastLogIndex && j < len(args.Entries) {
+		if rf.log[i].Term != args.Entries[j].Term {
+			break
 		}
+		i++
+		j++
 	}
-	// clip trailing entries and append leader's entries
-	rf.log = rf.log[:i]
-	rf.log = append(rf.log, args.Entries[j:]...)
-	rf.mu.Unlock()
+	// if an exisiting entry conflicts with a new one, delete the existing entry and all that follow it
+	if i <= lastLogIndex && j < len(args.Entries) {
+		rf.log = rf.log[:i]
+	}
+	// append new entries not already in the log
+	if j < len(args.Entries) {
+		rf.log = append(rf.log, args.Entries[j:]...)
+		DPrintf("Follower %d (T: %d) replicated by leader %d (T: %d), now log:"+rf.printLog(), rf.me, rf.currentTerm, args.LearId, args.Term)
+	}
 
 	go rf.persist()
 
 	// update commitIndex
-	rf.mu.Lock()
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= len(rf.log)-1 {
 			rf.commitIndex = args.LeaderCommit
@@ -556,7 +547,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// for heartbeat: reset timer and build authority
 	rf.leader = args.LearId
-	rf.mu.Unlock()
 
 	rf.timer.reset()
 	// return true
@@ -702,6 +692,9 @@ func (rf *Raft) sendAppendEntries(server int, lastLogIndex int, term int, leader
 			return
 		}
 
+		rf.mu.Lock()
+		term = rf.currentTerm
+		rf.mu.Unlock()
 		if reply.Term > term {
 			// convert back to follower
 			rf.mu.Lock()
