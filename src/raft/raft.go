@@ -101,8 +101,7 @@ type Raft struct {
 	applyCond *sync.Cond    // applyCOnd
 	applyCh   chan ApplyMsg // apply channel
 
-	// persisted property for snapshot
-	lastIncludedIndex int
+	lastIncludedIndex int // persisted property for snapshot
 	// lastIncludedTerm can be stored in the dummy node implicitly
 }
 
@@ -181,6 +180,10 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.log[0].Term = LastIncludedTerm
 	}
 
+	// initialize lastApplied and commitIndex
+	rf.lastApplied = rf.lastIncludedIndex
+	rf.commitIndex = rf.lastIncludedIndex
+
 	DPrintf("Server %d (T: %d) reads from persisted state, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 }
 
@@ -208,7 +211,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if rf.lastIncludedIndex+len(rf.log)-1 < index || rf.commitIndex < index {
 		return
 	}
-	// DPrintf("Server %d (T: %d) tries to create snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+	DPrintf("Server %d (T: %d) tries to create snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 
 	// apply commitable entries
 	rf.applyCond.Broadcast()
@@ -236,20 +239,152 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	state := w.Bytes()
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 
-	// apply snapshot
-	// rf.lastApplied = index
-
-	// applyMsg := ApplyMsg{
-	// 	SnapshotValid: true,
-	// 	Snapshot:      snapshot,
-	// 	SnapshotTerm:  lastIncludedTerm,
-	// 	SnapshotIndex: index,
-	// }
-	// rf.mu.Unlock()
-	// rf.applyCh <- applyMsg
-	// rf.mu.Lock()
-
 	DPrintf("Server %d (T: %d) created a snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+}
+
+// InstallSnapshot RPC arguments structure
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+// InstallSnapshot RPC reply structure
+type InstallSnapshotReply struct {
+	Term int
+}
+
+//
+// InstallSnapshot RPC handler
+//
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.Term = rf.currentTerm
+
+	// reject if from previous term
+	if rf.currentTerm > args.Term {
+		return
+	}
+
+	// check term
+	if rf.currentTerm < args.Term {
+		// convert to follower
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.leader = -1
+		rf.persist()
+	}
+
+	// if follower has more recent snapshot, ignore
+	if rf.lastIncludedIndex >= args.LastIncludedIndex {
+		return
+	}
+
+	DPrintf("Server %d (T: %d) receives an InstallSnapshot RPC, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+
+	// compare logs
+	// if the snapshot is a prefix of follower's log
+	if rf.lastIncludedIndex+len(rf.log)-1 > args.LastIncludedIndex &&
+		rf.log[args.LastIncludedIndex-rf.lastIncludedIndex].Term == args.LastIncludedTerm {
+
+		// log at least up to lastIncludedIndex is commitable
+		if rf.commitIndex < args.LastIncludedIndex {
+			rf.commitIndex = args.LastIncludedIndex
+		}
+
+		// apply commitable entries
+		rf.applyCond.Broadcast()
+
+		// discard the prefix and reply
+		dummy := []*Entry{}
+		dummy = append(dummy, &Entry{"", args.LastIncludedTerm})
+		rf.log = append(dummy, rf.log[args.LastIncludedIndex-rf.lastIncludedIndex+1:]...)
+		rf.lastIncludedIndex = args.LastIncludedIndex
+	} else { // if the entry term does not match or follower is behind the snapshot
+		// discard its entire log and force the snapshot
+		rf.log = []*Entry{}
+		rf.log = append(rf.log, &Entry{"", args.LastIncludedTerm})
+		rf.lastIncludedIndex = args.LastIncludedIndex
+
+		// persist
+		if PERSIST {
+			// encode and send both state and snapshot to persister
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(rf.currentTerm)
+			e.Encode(rf.votedFor)
+			e.Encode(rf.log)
+			e.Encode(rf.lastIncludedIndex)
+			e.Encode(rf.log[0].Term)
+			state := w.Bytes()
+			rf.persister.SaveStateAndSnapshot(state, args.Data)
+		}
+		// apply snapshot
+		rf.commitIndex = args.LastIncludedIndex
+		rf.lastApplied = args.LastIncludedIndex
+
+		applyMsg := ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotTerm:  args.LastIncludedTerm,
+			SnapshotIndex: args.LastIncludedIndex,
+		}
+		rf.mu.Unlock()
+		rf.applyCh <- applyMsg
+		rf.mu.Lock()
+	}
+	DPrintf("Server %d (T: %d) installed a snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+}
+
+//
+// method to send InstallSnapshot RPC to given follower
+//
+func (rf *Raft) sendInstallSnapshot(server int) {
+	rf.mu.Lock()
+
+	// check leadership and nextIndex
+	if rf.leader != rf.me || rf.nextIndex[server]-rf.lastIncludedIndex >= 1 {
+		rf.mu.Unlock()
+		return
+	}
+
+	// initialize args and reply
+	args := InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm:  rf.log[0].Term,
+		Data:              rf.persister.ReadSnapshot(),
+	}
+	reply := InstallSnapshotReply{}
+	rf.mu.Unlock()
+
+	// call RPC
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", &args, &reply)
+	if ok {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		if reply.Term > rf.currentTerm {
+			// convert back to follower
+			rf.currentTerm = reply.Term
+			rf.leader = -1
+			rf.votedFor = -1
+			rf.persist()
+		}
+
+		// check leadership, term and up-to-date reply
+		if rf.leader != rf.me || rf.currentTerm != args.Term || rf.nextIndex[server]-rf.lastIncludedIndex >= 1 {
+			return
+		}
+
+		// update nextIndex
+		rf.nextIndex[server] = rf.lastIncludedIndex + 1
+	}
 }
 
 //
@@ -502,6 +637,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	// if contains outdated prevLog, decline
+	if args.PrevLogIndex-rf.lastIncludedIndex < 0 {
+		reply.Success = false
+		return
+	}
+
 	// match prevLog: if log length does not match
 	lastLogIndex := rf.lastIncludedIndex + len(rf.log) - 1
 	if lastLogIndex < args.PrevLogIndex {
@@ -658,15 +799,14 @@ func (rf *Raft) sendAppendEntries(server int) {
 	}
 	currentTerm := rf.currentTerm
 	nextIndex := rf.nextIndex[server]
-	// here check if backtracking out of range, send installSnapshotRPC
-	if nextIndex-rf.lastIncludedIndex < 0 {
-		// go rf.sendInstallSnapshotRPC(server)
-		// if success, update in the sender method
+	// if backtracking out of range, send installSnapshotRPC
+	if nextIndex-rf.lastIncludedIndex < 1 {
+		go rf.sendInstallSnapshot(server)
+		// if success, update nextIndex and matchIndex in the sender method
 		rf.mu.Unlock()
 		return
 	}
 	prevLogIndex := nextIndex - 1
-	// DPrintf("nextIndex-rf.lastIncludedIndex: %d\n", nextIndex-rf.lastIncludedIndex)
 	prevLogTerm := rf.log[prevLogIndex-rf.lastIncludedIndex].Term
 
 	entries := []*Entry{} // initialized as empty
