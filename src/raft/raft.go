@@ -180,8 +180,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.log[0].Term = LastIncludedTerm
 	}
 
-	// initialize lastApplied and commitIndex
-	rf.lastApplied = rf.lastIncludedIndex
+	// initialize commitIndex
 	rf.commitIndex = rf.lastIncludedIndex
 
 	DPrintf("Server %d (T: %d) reads from persisted state, now log: "+rf.printLog(), rf.me, rf.currentTerm)
@@ -207,14 +206,17 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	// if server has more recent snapshot, ignore
+	if rf.lastIncludedIndex >= index {
+		return
+	}
+
 	// if server does not contain enough info or entries not commited yet, ignore
 	if rf.lastIncludedIndex+len(rf.log)-1 < index || rf.commitIndex < index {
 		return
 	}
-	DPrintf("Server %d (T: %d) tries to create snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 
-	// apply commitable entries
-	rf.applyCond.Broadcast()
+	DPrintf("Server %d (T: %d) tries to create snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 
 	// update dummy node and trim the log till index
 	dummy := []*Entry{}
@@ -225,21 +227,15 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.lastIncludedIndex = index
 
 	// persist
-	if !PERSIST {
-		return
-	}
-	// encode and send both state and snapshot to persister
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	e.Encode(rf.lastIncludedIndex)
-	e.Encode(rf.log[0].Term)
-	state := w.Bytes()
+	rf.persist()
+	// send both state and snapshot to persister
+	state := rf.persister.ReadRaftState()
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 
 	DPrintf("Server %d (T: %d) created a snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+
+	// apply snapshot
+	rf.applyCond.Broadcast()
 }
 
 // InstallSnapshot RPC arguments structure
@@ -279,7 +275,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.persist()
 	}
 
-	// if follower has more recent snapshot, ignore
+	// if follower has more recent snapshot, reject
 	if rf.lastIncludedIndex >= args.LastIncludedIndex {
 		return
 	}
@@ -291,53 +287,35 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if rf.lastIncludedIndex+len(rf.log)-1 > args.LastIncludedIndex &&
 		rf.log[args.LastIncludedIndex-rf.lastIncludedIndex].Term == args.LastIncludedTerm {
 
-		// log at least up to lastIncludedIndex is commitable
-		if rf.commitIndex < args.LastIncludedIndex {
-			rf.commitIndex = args.LastIncludedIndex
-		}
-
-		// apply commitable entries
-		rf.applyCond.Broadcast()
-
-		// discard the prefix and reply
+		// discard the prefix
 		dummy := []*Entry{}
 		dummy = append(dummy, &Entry{"", args.LastIncludedTerm})
 		rf.log = append(dummy, rf.log[args.LastIncludedIndex-rf.lastIncludedIndex+1:]...)
-		rf.lastIncludedIndex = args.LastIncludedIndex
+
 	} else { // if the entry term does not match or follower is behind the snapshot
-		// discard its entire log and force the snapshot
+
+		// discard its entire log
 		rf.log = []*Entry{}
 		rf.log = append(rf.log, &Entry{"", args.LastIncludedTerm})
-		rf.lastIncludedIndex = args.LastIncludedIndex
-
-		// persist
-		if PERSIST {
-			// encode and send both state and snapshot to persister
-			w := new(bytes.Buffer)
-			e := labgob.NewEncoder(w)
-			e.Encode(rf.currentTerm)
-			e.Encode(rf.votedFor)
-			e.Encode(rf.log)
-			e.Encode(rf.lastIncludedIndex)
-			e.Encode(rf.log[0].Term)
-			state := w.Bytes()
-			rf.persister.SaveStateAndSnapshot(state, args.Data)
-		}
-		// apply snapshot
-		rf.commitIndex = args.LastIncludedIndex
-		rf.lastApplied = args.LastIncludedIndex
-
-		applyMsg := ApplyMsg{
-			SnapshotValid: true,
-			Snapshot:      args.Data,
-			SnapshotTerm:  args.LastIncludedTerm,
-			SnapshotIndex: args.LastIncludedIndex,
-		}
-		rf.mu.Unlock()
-		rf.applyCh <- applyMsg
-		rf.mu.Lock()
 	}
+
+	// update metadate
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	// log at least up to lastIncludedIndex is commitable
+	if rf.commitIndex < args.LastIncludedIndex {
+		rf.commitIndex = args.LastIncludedIndex
+	}
+
+	// persist
+	rf.persist()
+	// send both state and snapshot to persister
+	state := rf.persister.ReadRaftState()
+	rf.persister.SaveStateAndSnapshot(state, args.Data)
+
 	DPrintf("Server %d (T: %d) installed a snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+
+	// apply snapshot
+	rf.applyCond.Broadcast()
 }
 
 //
@@ -894,15 +872,30 @@ func (rf *Raft) applier() {
 		}
 
 		rf.lastApplied++
-		// apply
-		applyMsg := ApplyMsg{
-			CommandValid: true,
-			Command:      rf.log[rf.lastApplied-rf.lastIncludedIndex].Command,
-			CommandIndex: rf.lastApplied,
+		if rf.lastApplied-rf.lastIncludedIndex > 0 {
+			// apply command
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[rf.lastApplied-rf.lastIncludedIndex].Command,
+				CommandIndex: rf.lastApplied,
+			}
+			DPrintf("Server %d (T: %d) applied entry %d, now log: "+rf.printLog(), rf.me, rf.currentTerm, applyMsg.CommandIndex)
+			rf.mu.Unlock()
+			rf.applyCh <- applyMsg
+		} else {
+			// apply snapshot
+			rf.lastApplied = rf.lastIncludedIndex
+
+			applyMsg := ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      rf.persister.ReadSnapshot(),
+				SnapshotTerm:  rf.log[0].Term,
+				SnapshotIndex: rf.lastIncludedIndex,
+			}
+			DPrintf("Server %d (T: %d) applied snapshot till %d, now log: "+rf.printLog(), rf.me, rf.currentTerm, applyMsg.SnapshotIndex)
+			rf.mu.Unlock()
+			rf.applyCh <- applyMsg
 		}
-		DPrintf("Server %d (T: %d) applied entry %d, now log: "+rf.printLog(), rf.me, rf.currentTerm, applyMsg.CommandIndex)
-		rf.mu.Unlock()
-		rf.applyCh <- applyMsg
 	}
 }
 
