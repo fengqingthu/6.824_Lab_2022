@@ -9,12 +9,12 @@ import (
 const Debug = false
 
 // DPrint configs
-const PRINTLOG = true
+const PRINTLOG = false
 const PRINTCOMMAND = false
 
 var gStart time.Time
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
+func DPrintf(format string, a ...interface{}) {
 	if Debug {
 		prefix := fmt.Sprintf("%06d ", time.Since(gStart).Milliseconds())
 		fmt.Printf(prefix+format, a...)
