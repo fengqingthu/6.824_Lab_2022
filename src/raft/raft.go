@@ -60,6 +60,8 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	// For 3A: to check if are still leader for the same term
+	CommandTerm int
 
 	// For 2D:
 	SnapshotValid bool
@@ -880,6 +882,7 @@ func (rf *Raft) applier() {
 				CommandValid: true,
 				Command:      rf.log[rf.lastApplied-rf.lastIncludedIndex].Command,
 				CommandIndex: rf.lastApplied,
+				CommandTerm:  rf.currentTerm,
 			}
 			//DPrintf("Server %d (T: %d) applied entry %d, now log: "+rf.printLog(), rf.me, rf.currentTerm, applyMsg.CommandIndex)
 			rf.mu.Unlock()
