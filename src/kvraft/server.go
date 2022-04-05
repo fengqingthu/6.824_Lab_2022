@@ -15,7 +15,7 @@ const TIMEOUT = 500 * time.Millisecond
 
 const INTERVAL = 10 * time.Millisecond
 
-const Debug = false
+const Debug = true
 
 var gStart time.Time
 
