@@ -9,8 +9,8 @@ const (
 type Err string
 
 type ClientRecord struct {
-	requestID    int
-	lastResponse *CommandReply
+	RequestID    int
+	LastResponse *CommandReply
 }
 
 // Put or Append

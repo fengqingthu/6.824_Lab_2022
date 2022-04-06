@@ -6,7 +6,7 @@ import (
 )
 
 // Debugging
-const Debug = true
+const Debug = false
 
 // DPrint configs
 const PRINTLOG = false
@@ -19,7 +19,6 @@ func DPrintf(format string, a ...interface{}) {
 		prefix := fmt.Sprintf("%06d ", time.Since(gStart).Milliseconds())
 		fmt.Printf(prefix+format, a...)
 	}
-	return
 }
 
 //
