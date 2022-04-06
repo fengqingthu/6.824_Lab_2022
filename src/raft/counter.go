@@ -19,10 +19,12 @@ func (ct *Counter) get() int {
 }
 
 // increment counter
-func (ct *Counter) increment(h int) {
+func (ct *Counter) increment(h int) int {
 	ct.Lock()
-	ct.num += h
+	num := ct.num + h
+	ct.num = num
 	ct.Unlock()
+	return num
 }
 
 // reset counter

@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -40,7 +41,7 @@ const HEARTBEAT = 50
 const INTERVAL = 50
 
 // global const, timer unit
-const TIMERUNIT = 20
+const TIMERUNIT = 10
 
 // persist configs
 const PERSIST = true
@@ -60,6 +61,8 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	// For 3A: to check if are still leader for the same term
+	CommandTerm int
 
 	// For 2D:
 	SnapshotValid bool
@@ -118,7 +121,7 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 // re-randomized timeout
-func (rf *Raft) ResetTimeout() {
+func (rf *Raft) resetTimeout() {
 	rf.timeout.reset()
 	rf.timeout.increment(rand.Intn(HIGH-LOW) + LOW)
 }
@@ -190,9 +193,6 @@ func (rf *Raft) readPersist(data []byte) {
 // have more recent info since it communicate the snapshot on applyCh.
 //
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
 	return true
 }
 
@@ -210,12 +210,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		return
 	}
 
-	// if server does not contain enough info or entries not commited yet, ignore
+	// if server does not contain enough info or entries not commited yet, panic
 	if rf.lastIncludedIndex+len(rf.log)-1 < index || rf.commitIndex < index {
-		return
+		panic(fmt.Sprintf("Server %d takes snapshot that its raft does not have in the log\n", rf.me))
 	}
 
-	//DPrintf("Server %d (T: %d) tries to create snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+	// DPrintf("Server %d (T: %d) tries to create snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 
 	// update dummy node and trim the log till index
 	var dummy []*Entry
@@ -231,7 +231,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	state := rf.persister.ReadRaftState()
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 
-	//DPrintf("Server %d (T: %d) created a snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+	// DPrintf("Server %d (T: %d) created a snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 
 	// apply snapshot
 	rf.applyCond.Broadcast()
@@ -279,7 +279,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 
-	//DPrintf("Server %d (T: %d) receives an InstallSnapshot RPC, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+	// DPrintf("Server %d (T: %d) receives an InstallSnapshot RPC, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 
 	// compare logs
 	// if the snapshot is a prefix of follower's log
@@ -311,7 +311,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	state := rf.persister.ReadRaftState()
 	rf.persister.SaveStateAndSnapshot(state, args.Data)
 
-	//DPrintf("Server %d (T: %d) installed a snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+	// DPrintf("Server %d (T: %d) installed a snapshot, now log: "+rf.printLog(), rf.me, rf.currentTerm)
 
 	// apply snapshot
 	rf.applyCond.Broadcast()
@@ -757,7 +757,6 @@ func (rf *Raft) heartbeater() {
 // the method to send heartbeat to all followers
 //
 func (rf *Raft) sendHeartbeat() {
-
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			// send heatbeat in parallel
@@ -820,11 +819,12 @@ func (rf *Raft) sendAppendEntries(server int) {
 
 		// update nextIndex and matchIndex
 		if reply.Success {
-			if len(entries) != 0 {
-				//DPrintf("Leader %d (T: %d) replicated with follower %d (T: %d)\n", rf.me, rf.currentTerm, server, reply.Term)
-			}
+			// if len(entries) != 0 {
+			// 	DPrintf("Leader %d (T: %d) replicated with follower %d (T: %d)\n", rf.me, rf.currentTerm, server, reply.Term)
+			// }
 			rf.matchIndex[server] = prevLogIndex + len(entries)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
+			go rf.updateCommit()
 		} else {
 			// kinda binary search, retry
 			rf.nextIndex[server] = nextIndex / 2
@@ -880,6 +880,7 @@ func (rf *Raft) applier() {
 				CommandValid: true,
 				Command:      rf.log[rf.lastApplied-rf.lastIncludedIndex].Command,
 				CommandIndex: rf.lastApplied,
+				CommandTerm:  rf.currentTerm,
 			}
 			//DPrintf("Server %d (T: %d) applied entry %d, now log: "+rf.printLog(), rf.me, rf.currentTerm, applyMsg.CommandIndex)
 			rf.mu.Unlock()
@@ -906,7 +907,7 @@ func (rf *Raft) applier() {
 func (rf *Raft) ticker() {
 
 	// initialize timeout
-	rf.ResetTimeout()
+	rf.resetTimeout()
 
 	// timer goroutine
 	go func(timer *Counter) {
@@ -923,10 +924,10 @@ func (rf *Raft) ticker() {
 		_, isleader := rf.GetState()
 		if !isleader {
 			if rf.timer.get() > rf.timeout.get() {
-				rf.ResetTimeout()
-				rf.mu.Lock()
-				//DPrintf("Server %d (T: %d) starts election, now log: "+rf.printLog(), rf.me, rf.currentTerm)
-				rf.mu.Unlock()
+				rf.resetTimeout()
+				// rf.mu.Lock()
+				// DPrintf("Server %d (T: %d) starts election, now log: "+rf.printLog(), rf.me, rf.currentTerm)
+				// rf.mu.Unlock()
 				rf.startElection()
 			}
 		}
