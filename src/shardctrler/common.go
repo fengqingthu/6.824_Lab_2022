@@ -29,44 +29,76 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK         = "OK"
+	ErrTimeout = "ErrTimeout"
 )
 
 type Err string
 
-type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+const (
+	Join  = "Join"
+	Leave = "Leave"
+	Move  = "Move"
+	Query = "Query"
+)
+
+type Command string
+
+// type JoinArgs struct {
+// 	Servers map[int][]string // new GID -> servers mappings
+// }
+
+// type JoinReply struct {
+// 	WrongLeader bool
+// 	Err         Err
+// }
+
+// type LeaveArgs struct {
+// 	GIDs []int
+// }
+
+// type LeaveReply struct {
+// 	WrongLeader bool
+// 	Err         Err
+// }
+
+// type MoveArgs struct {
+// 	Shard int
+// 	GID   int
+// }
+
+// type MoveReply struct {
+// 	WrongLeader bool
+// 	Err         Err
+// }
+
+// type QueryArgs struct {
+// 	Num int // desired config number
+// }
+
+// type QueryReply struct {
+// 	WrongLeader bool
+// 	Err         Err
+// 	Config      Config
+// }
+
+type ClientRecord struct {
+	RequestID    int
+	LastResponse *CommandReply
 }
 
-type JoinReply struct {
-	WrongLeader bool
-	Err         Err
+type CommandArgs struct {
+	Type      Command
+	ClientID  int64
+	RequestID int
+	Servers   map[int][]string // for join: new GID -> servers mappings
+	GIDs      []int            // for leave: GIDs to remove
+	Shard     int              // for move: the shard to be assigned
+	GID       int              // for move: the specified GID
+	Num       int              // for query: desired config number
 }
 
-type LeaveArgs struct {
-	GIDs []int
-}
-
-type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type MoveArgs struct {
-	Shard int
-	GID   int
-}
-
-type MoveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type QueryArgs struct {
-	Num int // desired config number
-}
-
-type QueryReply struct {
+type CommandReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
