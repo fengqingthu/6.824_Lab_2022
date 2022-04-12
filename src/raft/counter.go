@@ -11,7 +11,7 @@ type Counter struct {
 }
 
 // get method
-func (ct *Counter) get() int {
+func (ct *Counter) Get() int {
 	ct.RLock()
 	res := ct.num
 	ct.RUnlock()
@@ -19,7 +19,7 @@ func (ct *Counter) get() int {
 }
 
 // increment counter
-func (ct *Counter) increment(h int) int {
+func (ct *Counter) Increment(h int) int {
 	ct.Lock()
 	num := ct.num + h
 	ct.num = num
@@ -28,7 +28,7 @@ func (ct *Counter) increment(h int) int {
 }
 
 // reset counter
-func (ct *Counter) reset() {
+func (ct *Counter) Reset() {
 	ct.Lock()
 	ct.num = 0
 	ct.Unlock()

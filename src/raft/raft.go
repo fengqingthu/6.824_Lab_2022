@@ -122,8 +122,8 @@ func (rf *Raft) GetState() (int, bool) {
 
 // re-randomized timeout
 func (rf *Raft) resetTimeout() {
-	rf.timeout.reset()
-	rf.timeout.increment(rand.Intn(HIGH-LOW) + LOW)
+	rf.timeout.Reset()
+	rf.timeout.Increment(rand.Intn(HIGH-LOW) + LOW)
 }
 
 //
@@ -351,7 +351,7 @@ func (rf *Raft) sendInstallSnapshot(server int) {
 			rf.currentTerm = reply.Term
 			rf.leader = -1
 			rf.votedFor = -1
-			rf.timer.reset()
+			rf.timer.Reset()
 			rf.persist()
 		}
 
@@ -428,7 +428,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				rf.persist()
 			}
 			reply.VoteGranted = true
-			rf.timer.reset()
+			rf.timer.Reset()
 			return
 		}
 	}
@@ -474,7 +474,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 //
 func (rf *Raft) startElection() {
 	// reset timer
-	rf.timer.reset()
+	rf.timer.Reset()
 
 	// get state and increment term
 	rf.mu.Lock()
@@ -501,7 +501,7 @@ func (rf *Raft) startElection() {
 		// send RequestVote RPC in parallel
 		go func(rf *Raft, server int) {
 			// check if election already ends
-			if hasEnded.get() > 0 {
+			if hasEnded.Get() > 0 {
 				return
 			}
 			// check candidate state and term
@@ -525,7 +525,7 @@ func (rf *Raft) startElection() {
 					rf.currentTerm = reply.Term
 					rf.votedFor = -1
 					rf.leader = -1
-					rf.timer.reset()
+					rf.timer.Reset()
 					rf.persist()
 				}
 				// check candidate state and term
@@ -533,19 +533,19 @@ func (rf *Raft) startElection() {
 					return
 				}
 				// check for election has not ended
-				if hasEnded.get() > 0 {
+				if hasEnded.Get() > 0 {
 					return
 				}
 				if reply.VoteGranted {
-					winVotes.increment(1)
+					winVotes.Increment(1)
 				} else {
-					loseVotes.increment(1)
+					loseVotes.Increment(1)
 				}
 
 				// wins the election
-				if winVotes.get() >= majority {
+				if winVotes.Get() >= majority {
 					// becomes leader
-					hasEnded.increment(1)
+					hasEnded.Increment(1)
 					//DPrintf("Server %d (T: %d) becomes the leader!\n", rf.me, rf.currentTerm)
 					rf.leader = rf.me
 					// initialize leader's state and send heartbeat
@@ -558,9 +558,9 @@ func (rf *Raft) startElection() {
 					return
 				}
 				// lose the election
-				if loseVotes.get() >= majority {
+				if loseVotes.Get() >= majority {
 					// convert to follower
-					hasEnded.increment(1)
+					hasEnded.Increment(1)
 					rf.votedFor = -1
 
 					rf.persist()
@@ -671,7 +671,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// for heartbeat: reset timer and build authority
 	rf.leader = args.LeaderId
-	rf.timer.reset()
+	rf.timer.Reset()
 
 	// return true
 	reply.Success = true
@@ -808,7 +808,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 			rf.currentTerm = reply.Term
 			rf.leader = -1
 			rf.votedFor = -1
-			rf.timer.reset()
+			rf.timer.Reset()
 			rf.persist()
 		}
 
@@ -914,7 +914,7 @@ func (rf *Raft) ticker() {
 		lastTime := time.Now()
 		for !rf.killed() {
 			time.Sleep(TIMERUNIT * time.Millisecond)
-			timer.increment(int(time.Since(lastTime).Milliseconds()))
+			timer.Increment(int(time.Since(lastTime).Milliseconds()))
 			lastTime = time.Now()
 		}
 	}(rf.timer)
@@ -923,7 +923,7 @@ func (rf *Raft) ticker() {
 	for !rf.killed() {
 		_, isleader := rf.GetState()
 		if !isleader {
-			if rf.timer.get() > rf.timeout.get() {
+			if rf.timer.Get() > rf.timeout.Get() {
 				rf.resetTimeout()
 				// rf.mu.Lock()
 				// DPrintf("Server %d (T: %d) starts election, now log: "+rf.printLog(), rf.me, rf.currentTerm)
