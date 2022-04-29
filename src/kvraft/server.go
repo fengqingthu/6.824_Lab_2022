@@ -56,14 +56,6 @@ type KVServer struct {
 	persister        *raft.Persister            // the persister of the kv server
 }
 
-// func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-// 	// Your code here.
-// }
-
-// func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-// 	// Your code here.
-// }
-
 // merge read/write RPCs to one
 // RPC handler for client's command
 func (kv *KVServer) CommandRequest(args *CommandArgs, reply *CommandReply) {

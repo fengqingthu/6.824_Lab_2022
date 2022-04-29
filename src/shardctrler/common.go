@@ -44,44 +44,6 @@ const (
 
 type Command string
 
-// type JoinArgs struct {
-// 	Servers map[int][]string // new GID -> servers mappings
-// }
-
-// type JoinReply struct {
-// 	WrongLeader bool
-// 	Err         Err
-// }
-
-// type LeaveArgs struct {
-// 	GIDs []int
-// }
-
-// type LeaveReply struct {
-// 	WrongLeader bool
-// 	Err         Err
-// }
-
-// type MoveArgs struct {
-// 	Shard int
-// 	GID   int
-// }
-
-// type MoveReply struct {
-// 	WrongLeader bool
-// 	Err         Err
-// }
-
-// type QueryArgs struct {
-// 	Num int // desired config number
-// }
-
-// type QueryReply struct {
-// 	WrongLeader bool
-// 	Err         Err
-// 	Config      Config
-// }
-
 type ClientRecord struct {
 	RequestID    int
 	LastResponse *CommandReply

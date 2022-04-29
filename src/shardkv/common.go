@@ -14,31 +14,32 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrTimeout     = "ErrTimeout"
 )
 
 type Err string
 
-// Put or Append
-type PutAppendArgs struct {
-	// You'll have to add definitions here.
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+type ClientRecord struct {
+	RequestID    int
+	LastResponse *CommandReply
 }
 
-type PutAppendReply struct {
-	Err Err
+type Shard struct {
+	Num int
+	// mu   sync.RWMutex
+	Data map[string]string
 }
 
-type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
+// use an integrated RPC args & replys instead
+type CommandArgs struct {
+	Key       string
+	Value     string
+	Op        string
+	ClientID  int64
+	RequestID int
 }
 
-type GetReply struct {
+type CommandReply struct {
 	Err   Err
 	Value string
 }
