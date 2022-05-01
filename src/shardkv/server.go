@@ -31,23 +31,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-
-	// for public command - handle client requests
-	Key       string
-	Value     string
-	Type      string
-	ClientID  int64
-	RequestID int
-
-	// for private command - change config state
-	Config  shardctrler.Config
-	Serving bool
-}
-
 type ShardKV struct {
 	mu           sync.Mutex
 	me           int
@@ -64,15 +47,46 @@ type ShardKV struct {
 	persister *raft.Persister    // the persister of the kv server
 
 	// persistent state
-	db               map[int]Shard          // mapping shardNum to shards
-	sessions         map[int64]ClientRecord // memoization for each client's last response
-	lastAppliedIndex int                    // last applied index of log entry
-	config           shardctrler.Config     // current config
-	serving          bool
+	db                  map[int]Shard          // mapping shardNum to shards
+	sessions            map[int64]ClientRecord // memoization for each client's last response
+	lastAppliedIndex    int                    // last applied index of log entry
+	internalID          int                    // serial number for internal commands of this group
+	lastAppliedInternal int
+	config              shardctrler.Config // current config
+	serving             bool
 
 	// volatile state
 	dead    int32                      // set by Kill()
 	waitChs map[int]chan *CommandReply // a map of waitChs to retrieve corresponding command after agreement
+}
+
+// ==================== RPC Handlers ====================
+
+// method to send internal command to raft layer, return true if agreed otherwise false
+func (kv *ShardKV) commandInternal(op Op) bool {
+	// send command to raft layer for agreement
+	index, _, isLeader := kv.rf.Start(op)
+	if index == -1 || !isLeader {
+		return false
+	}
+
+	// checker loop
+	for !kv.killed() {
+		kv.mu.Lock()
+		// if successfully applied
+		if kv.lastAppliedInternal >= op.InternalID {
+			kv.mu.Unlock()
+			return true
+		}
+		// if not applied
+		if kv.lastAppliedIndex >= index && kv.lastAppliedInternal < op.InternalID {
+			kv.mu.Unlock()
+			return false
+		}
+		kv.mu.Unlock()
+		time.Sleep(INTERVAL)
+	}
+	return false
 }
 
 // merge read/write RPCs to one
@@ -99,6 +113,7 @@ func (kv *ShardKV) CommandRequest(args *CommandArgs, reply *CommandReply) {
 
 	// send command to raft for agreement
 	index, _, isLeader := kv.rf.Start(Op{
+		Command:   "Request",
 		Key:       args.Key,
 		Value:     args.Value,
 		Type:      args.Op,
@@ -131,7 +146,9 @@ func (kv *ShardKV) CommandRequest(args *CommandArgs, reply *CommandReply) {
 	}()
 }
 
-// method to check if given key should be served
+//
+
+// method to check if given key should be served in the current config
 func (kv *ShardKV) checkShard(key string) bool {
 	return kv.config.Shards[key2shard(key)] == kv.gid
 }
@@ -163,19 +180,21 @@ func (kv *ShardKV) killWaitCh(index int) {
 }
 
 // method to apply command to state machine
-func (kv *ShardKV) applyCommand(op Op) *CommandReply {
+func (kv *ShardKV) applyCommandRequest(op Op) *CommandReply {
 	reply := &CommandReply{Err: OK}
-	if op.Type == "Get" {
+
+	switch op.Type {
+	case "Get":
 		shard, ok := kv.db[key2shard(op.Key)]
 		if ok {
 			reply.Value = shard.Data[op.Key]
 		} // else can reply empty string for no-key
-	} else if op.Type == "Put" {
+	case "Put":
 		shard, ok := kv.db[key2shard(op.Key)]
 		if ok {
 			shard.Data[op.Key] = op.Value
 		}
-	} else {
+	case "Append":
 		shard, ok := kv.db[key2shard(op.Key)]
 		if ok {
 			shard.Data[op.Key] += op.Value
@@ -184,8 +203,14 @@ func (kv *ShardKV) applyCommand(op Op) *CommandReply {
 	return reply
 }
 
+// method to apply command to state machine
+func (kv *ShardKV) applyCommandInternal(op Op) {
+	kv.config = op.Config
+	kv.serving = op.Serving
+}
+
 //
-// For lab 3b
+// From lab 3b
 //
 
 // the mothod to determine if raft state is oversized
@@ -231,6 +256,45 @@ func (kv *ShardKV) applySnapshot(data []byte) {
 }
 
 //
+// For lab 4b
+//
+
+// method to change the state of this replica group
+func (kv *ShardKV) changeState(config shardctrler.Config, serving bool) {
+	kv.mu.Lock()
+	kv.internalID++
+	op := Op{
+		Command:    "Internal",
+		InternalID: kv.internalID,
+		Config:     config,
+		Serving:    serving,
+	}
+	kv.mu.Unlock()
+	// persistently send internal command
+	for !kv.killed() {
+		if kv.commandInternal(op) {
+			return
+		}
+		time.Sleep(INTERVAL)
+	}
+}
+
+// method to start config transition
+func (kv *ShardKV) startConfigTransition(newConfig shardctrler.Config) {
+	oldConfig := kv.config
+	// stop serving
+	kv.changeState(oldConfig, false)
+	// concurrently push shards
+
+	// check if have all the shards needed, progress config
+
+	// send ready message to ctrl
+
+	// wait for canserve message
+
+}
+
+//
 // long-running applier goroutine
 //
 func (kv *ShardKV) applier() {
@@ -247,8 +311,8 @@ func (kv *ShardKV) applier() {
 					kv.mu.Unlock()
 					continue
 				}
-				// if no longer serving, ignore
-				if !kv.serving || !kv.checkShard(op.Key) {
+				// if requestOp no longer serving, ignore
+				if op.Command == "Request" && (!kv.serving || !kv.checkShard(op.Key)) {
 					kv.mu.Unlock()
 					continue
 				}
@@ -257,14 +321,20 @@ func (kv *ShardKV) applier() {
 
 				var reply *CommandReply
 				// check for duplicates before apply to state machine
-				if op.Type != "Get" && kv.checkDuplicate(op.ClientID, op.RequestID) {
+				if (op.Type == "Put" || op.Type == "Append") && kv.checkDuplicate(op.ClientID, op.RequestID) {
 					reply = kv.sessions[op.ClientID].LastResponse
 				} else {
-					reply = kv.applyCommand(op)
-					// DPrintf("Server %d applied command %+v\n", kv.me, command)
-					if op.Type != "Get" {
-						kv.sessions[op.ClientID] = ClientRecord{op.RequestID, reply}
+					switch op.Command {
+					case "Request":
+						reply = kv.applyCommandRequest(op)
+						if op.Type == "Put" || op.Type == "Append" {
+							kv.sessions[op.ClientID] = ClientRecord{op.RequestID, reply}
+						}
+					case "Internal":
+						kv.applyCommandInternal(op)
+						kv.lastAppliedInternal = op.InternalID
 					}
+					// DPrintf("Server %d applied command %+v\n", kv.me, command)
 				}
 
 				// after applying command, compare if raft is oversized
@@ -274,7 +344,7 @@ func (kv *ShardKV) applier() {
 				}
 
 				// check the same term and leadership before reply
-				if currentTerm, isLeader := kv.rf.GetState(); currentTerm == applyMsg.CommandTerm && isLeader {
+				if currentTerm, isLeader := kv.rf.GetState(); op.Command == "Request" && currentTerm == applyMsg.CommandTerm && isLeader {
 					ch := kv.getWaitCh(applyMsg.CommandIndex)
 					ch <- reply
 				}
@@ -300,8 +370,9 @@ func (kv *ShardKV) poller() {
 		_, isLeader := kv.rf.GetState()
 		if isLeader && kv.serving {
 			// ask for newer config
-			if newconfig := kv.ctrl.Query(kv.config.Num + 1); newconfig.Num > kv.config.Num {
+			if newConfig := kv.ctrl.Query(kv.config.Num + 1); newConfig.Num > kv.config.Num {
 				// start config transition
+				kv.startConfigTransition(newConfig)
 			}
 		}
 		time.Sleep(POLL)

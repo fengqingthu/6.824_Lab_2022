@@ -1,5 +1,7 @@
 package shardkv
 
+import "6.824/shardctrler"
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running Raft.
@@ -28,6 +30,26 @@ type Shard struct {
 	Num int
 	// mu   sync.RWMutex
 	Data map[string]string
+}
+
+type Op struct {
+	// Your definitions here.
+	// Field names must start with capital letters,
+	// otherwise RPC will break.
+
+	Command string // "Internal" or "Request"
+
+	// for request command - handle client requests
+	Key       string
+	Value     string
+	Type      string
+	ClientID  int64
+	RequestID int
+
+	// for internal command - change config state
+	InternalID int // the serial ID for internal commands
+	Config     shardctrler.Config
+	Serving    bool
 }
 
 // use an integrated RPC args & replys instead
