@@ -12,9 +12,9 @@ func (kv *ShardKV) PullShards(args *PullShardsArgs, reply *PullShardsReply) {
 	defer kv.mu.Unlock()
 
 	// if outdated, ignore
-	// if args.ConfigNum <= kv.config.Num {
-	// 	return
-	// }
+	if args.ConfigNum > kv.config.Num+1 {
+		return
+	}
 
 	// if not leader or still serving, return
 	if _, isLeader := kv.rf.GetState(); !isLeader || kv.state == Serving {

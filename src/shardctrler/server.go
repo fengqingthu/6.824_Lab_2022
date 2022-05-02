@@ -42,8 +42,8 @@ type ShardCtrler struct {
 	lastAppliedIndex int                        // last applied index of log entry
 
 	// for lab4b
-	configNum int                  // current config of groups
-	ready     map[int]map[int]bool // map configNum -> map gid->bool, need groups in both current config and proposed config to be ready
+	// configNum int                  // current config of groups
+	ready map[int]map[int]bool // map configNum -> map gid->bool, need groups in both current config and proposed config to be ready
 }
 
 type Op struct {
@@ -66,7 +66,10 @@ func (sc *ShardCtrler) CommandRequest(args *CommandArgs, reply *CommandReply) {
 	sc.mu.Lock()
 	// defer DPrintf("Server %d responded client %d's request %d: %+v\n", sc.me, args.ClientID, args.RequestID, reply)
 
-	// DPrintf("Server %d received request: %+v\n", sc.me, args)
+	// if args.Type == Ready {
+	// 	DPrintf("Server %d received request: %+v\n", sc.me, args)
+	// }
+
 	// check for duplicates
 	if args.Type != Query && args.Type != Ready && sc.checkDuplicate(args.ClientID, args.RequestID) {
 		reply.Err = sc.sessions[args.ClientID].LastResponse.Err
@@ -97,8 +100,10 @@ func (sc *ShardCtrler) CommandRequest(args *CommandArgs, reply *CommandReply) {
 		if args.Type == Ready {
 			// wait until all groups are ready, return OK
 			DPrintf("Ctrl commits config %d ready from group %d\n", args.ConfigNum, args.Group)
+
 			for {
 				sc.mu.Lock()
+				// DPrintf("%v\n", sc.ready[args.ConfigNum])
 				allReady := true
 				for _, ready := range sc.ready[args.ConfigNum] {
 					if !ready {
@@ -211,6 +216,11 @@ func (sc *ShardCtrler) applyCommand(op Op) *CommandReply {
 
 		// for lab4b, initialize new ready map
 		sc.ready[newConfig.Num] = make(map[int]bool)
+		// for _, config := range sc.configs {
+		// 	for group := range config.Groups {
+		// 		sc.ready[newConfig.Num][group] = false
+		// 	}
+		// }
 		for group := range currentConfig.Groups {
 			sc.ready[newConfig.Num][group] = false
 		}
@@ -238,6 +248,11 @@ func (sc *ShardCtrler) applyCommand(op Op) *CommandReply {
 
 		// for lab4b, initialize new ready map
 		sc.ready[newConfig.Num] = make(map[int]bool)
+		// for _, config := range sc.configs {
+		// 	for group := range config.Groups {
+		// 		sc.ready[newConfig.Num][group] = false
+		// 	}
+		// }
 		for group := range currentConfig.Groups {
 			sc.ready[newConfig.Num][group] = false
 		}
@@ -248,7 +263,13 @@ func (sc *ShardCtrler) applyCommand(op Op) *CommandReply {
 	// for lab4b
 	case opType == Ready:
 		// handle ready
-		sc.ready[op.ConfigNum][op.Group] = true
+		readyMap := sc.ready[op.ConfigNum]
+		if _, ok := readyMap[op.Group]; ok {
+			readyMap[op.Group] = true
+		}
+		if _, isLeader := sc.rf.GetState(); isLeader {
+			DPrintf("Ctrl updated ready map: %+v\n", sc.ready)
+		}
 	}
 	return reply
 }
@@ -414,7 +435,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.waitChs = make(map[int]chan *CommandReply)
 	sc.sessions = make(map[int64]ClientRecord)
 
-	sc.configNum = 0
 	sc.ready = make(map[int]map[int]bool)
 
 	go sc.applier()

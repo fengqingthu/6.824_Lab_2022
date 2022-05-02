@@ -26,7 +26,7 @@ func (kv *ShardKV) applyCommandInternal(op Op) {
 		}
 	case "Empty":
 		if _, isLeader := kv.rf.GetState(); isLeader {
-			// DPrintf("Group %d applied empty log entry during config %d\n", kv.gid, kv.config.Num)
+			DPrintf("Group %d applied empty log entry during config %d\n", kv.gid, kv.config.Num)
 		}
 	}
 }
