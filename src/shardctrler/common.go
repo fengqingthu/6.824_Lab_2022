@@ -40,6 +40,7 @@ const (
 	Leave = "Leave"
 	Move  = "Move"
 	Query = "Query"
+	Ready = "Ready"
 )
 
 type Command string
@@ -58,6 +59,9 @@ type CommandArgs struct {
 	Shard     int              // for move: the shard to be assigned
 	GID       int              // for move: the specified GID
 	Num       int              // for query: desired config number
+
+	ConfigNum int // for ready: proposed configNum
+	Group     int // for ready: the gid of ready group
 }
 
 type CommandReply struct {

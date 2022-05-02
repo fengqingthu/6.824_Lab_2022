@@ -19,7 +19,7 @@ const POLL = 50 * time.Millisecond
 
 const INTERVAL = 10 * time.Millisecond
 
-const Debug = false
+const Debug = true
 
 var gStart time.Time
 
@@ -53,56 +53,35 @@ type ShardKV struct {
 	internalID          int                    // serial number for internal commands of this group
 	lastAppliedInternal int
 	config              shardctrler.Config // current config
-	serving             bool
+	state               State              // serving, prepare or ready
 
 	// volatile state
 	dead    int32                      // set by Kill()
 	waitChs map[int]chan *CommandReply // a map of waitChs to retrieve corresponding command after agreement
 }
 
-// ==================== RPC Handlers ====================
-
-// method to send internal command to raft layer, return true if agreed otherwise false
-func (kv *ShardKV) commandInternal(op Op) bool {
-	// send command to raft layer for agreement
-	index, _, isLeader := kv.rf.Start(op)
-	if index == -1 || !isLeader {
-		return false
-	}
-
-	// checker loop
-	for !kv.killed() {
-		kv.mu.Lock()
-		// if successfully applied
-		if kv.lastAppliedInternal >= op.InternalID {
-			kv.mu.Unlock()
-			return true
-		}
-		// if not applied
-		if kv.lastAppliedIndex >= index && kv.lastAppliedInternal < op.InternalID {
-			kv.mu.Unlock()
-			return false
-		}
-		kv.mu.Unlock()
-		time.Sleep(INTERVAL)
-	}
-	return false
-}
-
 // merge read/write RPCs to one
 // RPC handler for client's command
 func (kv *ShardKV) CommandRequest(args *CommandArgs, reply *CommandReply) {
 	kv.mu.Lock()
-	defer DPrintf("Server %d responded client %d's request %d: %+v\n", kv.me, args.ClientID, args.RequestID, reply)
 
 	// check if should serve the key
-	if !kv.serving || !kv.checkShard(args.Key) {
+	if !kv.checkShard(args.Key) {
 		reply.Err = ErrWrongGroup
 		kv.mu.Unlock()
 		return
 	}
 
-	DPrintf("Server %d received request: %+v\n", kv.me, args)
+	// if not serving
+	if kv.state != Serving {
+		reply.Err = ErrNotServing
+		kv.mu.Unlock()
+		return
+	}
+
+	DPrintf("Group %d received request: %+v\n", kv.gid, args)
+	defer DPrintf("Group %d responded client %d's request %d: %+v\n", kv.gid, args.ClientID, args.RequestID, reply)
+
 	// check for duplicates
 	if args.Op != "Get" && kv.checkDuplicate(args.ClientID, args.RequestID) {
 		reply.Err = kv.sessions[args.ClientID].LastResponse.Err
@@ -125,7 +104,7 @@ func (kv *ShardKV) CommandRequest(args *CommandArgs, reply *CommandReply) {
 		return
 	}
 
-	DPrintf("Server %d sent client %d's request %d to raft at index %d\n", kv.me, args.ClientID, args.RequestID, index)
+	// DPrintf("Group %d sent client %d's request %d to raft at index %d\n", kv.gid, args.ClientID, args.RequestID, index)
 	kv.mu.Lock()
 	waitCh := kv.getWaitCh(index)
 	kv.mu.Unlock()
@@ -145,8 +124,6 @@ func (kv *ShardKV) CommandRequest(args *CommandArgs, reply *CommandReply) {
 		kv.mu.Unlock()
 	}()
 }
-
-//
 
 // method to check if given key should be served in the current config
 func (kv *ShardKV) checkShard(key string) bool {
@@ -179,7 +156,7 @@ func (kv *ShardKV) killWaitCh(index int) {
 	}
 }
 
-// method to apply command to state machine
+// method to apply request command to db
 func (kv *ShardKV) applyCommandRequest(op Op) *CommandReply {
 	reply := &CommandReply{Err: OK}
 
@@ -203,12 +180,6 @@ func (kv *ShardKV) applyCommandRequest(op Op) *CommandReply {
 	return reply
 }
 
-// method to apply command to state machine
-func (kv *ShardKV) applyCommandInternal(op Op) {
-	kv.config = op.Config
-	kv.serving = op.Serving
-}
-
 //
 // From lab 3b
 //
@@ -225,6 +196,10 @@ func (kv *ShardKV) takeSnapshot(index int) {
 	e.Encode(kv.db)
 	e.Encode(kv.sessions)
 	e.Encode(kv.lastAppliedIndex)
+	e.Encode(kv.lastAppliedInternal)
+	e.Encode(kv.internalID)
+	e.Encode(kv.config)
+	e.Encode(kv.state)
 	data := w.Bytes()
 	kv.rf.Snapshot(index, data)
 }
@@ -240,18 +215,30 @@ func (kv *ShardKV) applySnapshot(data []byte) {
 	var DB map[int]Shard
 	var Sessions map[int64]ClientRecord
 	var LastAppliedIndex int
+	var LastAppliedInternal int
+	var InternalID int
+	var Config shardctrler.Config
+	var State State
 
 	// decode, print error but do not panic
 	err1 := d.Decode(&DB)
 	err2 := d.Decode(&Sessions)
 	err3 := d.Decode(&LastAppliedIndex)
-	if err1 != nil || err2 != nil || err3 != nil {
+	err4 := d.Decode(&LastAppliedInternal)
+	err5 := d.Decode(&InternalID)
+	err6 := d.Decode(&Config)
+	err7 := d.Decode(&State)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil || err7 != nil {
 		DPrintf("Decoding error:%v, %v\n", err1, err2)
 	} else {
 		// apply
 		kv.db = DB
 		kv.sessions = Sessions
 		kv.lastAppliedIndex = LastAppliedIndex
+		kv.lastAppliedInternal = LastAppliedInternal
+		kv.internalID = InternalID
+		kv.config = Config
+		kv.state = State
 	}
 }
 
@@ -259,39 +246,36 @@ func (kv *ShardKV) applySnapshot(data []byte) {
 // For lab 4b
 //
 
-// method to change the state of this replica group
-func (kv *ShardKV) changeState(config shardctrler.Config, serving bool) {
-	kv.mu.Lock()
-	kv.internalID++
-	op := Op{
-		Command:    "Internal",
-		InternalID: kv.internalID,
-		Config:     config,
-		Serving:    serving,
-	}
-	kv.mu.Unlock()
-	// persistently send internal command
-	for !kv.killed() {
-		if kv.commandInternal(op) {
-			return
-		}
-		time.Sleep(INTERVAL)
-	}
-}
-
 // method to start config transition
 func (kv *ShardKV) startConfigTransition(newConfig shardctrler.Config) {
-	oldConfig := kv.config
 	// stop serving
-	kv.changeState(oldConfig, false)
-	// concurrently push shards
+	if kv.state != Ready {
+		if !kv.changeState(Prepare) {
+			return
+		}
+		// pull shards to newDB
+		newDB := kv.pullShards(newConfig)
 
-	// check if have all the shards needed, progress config
+		// change group state
+		if !kv.changeDB(newDB) {
+			return
+		}
+		if !kv.changeConfig(newConfig) {
+			return
+		}
+		if !kv.changeState(Ready) {
+			return
+		}
+	}
 
-	// send ready message to ctrl
+	// send ready message to ctrl and wait for commit message
+	kv.ctrl.Ready(newConfig.Num, kv.gid)
 
-	// wait for canserve message
-
+	// garbage collection and start serving
+	if !kv.changeState(Serving) {
+		return
+	}
+	DPrintf("Group %d transits to %+v\n", kv.gid, newConfig)
 }
 
 //
@@ -312,7 +296,7 @@ func (kv *ShardKV) applier() {
 					continue
 				}
 				// if requestOp no longer serving, ignore
-				if op.Command == "Request" && (!kv.serving || !kv.checkShard(op.Key)) {
+				if op.Command == "Request" && (kv.state != Serving || !kv.checkShard(op.Key)) {
 					kv.mu.Unlock()
 					continue
 				}
@@ -321,7 +305,7 @@ func (kv *ShardKV) applier() {
 
 				var reply *CommandReply
 				// check for duplicates before apply to state machine
-				if (op.Type == "Put" || op.Type == "Append") && kv.checkDuplicate(op.ClientID, op.RequestID) {
+				if op.Command == "Request" && op.Type != "Get" && kv.checkDuplicate(op.ClientID, op.RequestID) {
 					reply = kv.sessions[op.ClientID].LastResponse
 				} else {
 					switch op.Command {
@@ -339,7 +323,7 @@ func (kv *ShardKV) applier() {
 
 				// after applying command, compare if raft is oversized
 				if kv.needSnapshot() {
-					DPrintf("Server %d takes a snapshot till index %d\n", kv.me, applyMsg.CommandIndex)
+					// DPrintf("Server %d takes a snapshot till index %d\n", kv.me, applyMsg.CommandIndex)
 					kv.takeSnapshot(applyMsg.CommandIndex)
 				}
 
@@ -352,7 +336,7 @@ func (kv *ShardKV) applier() {
 			} else { // committed snapshot
 				kv.mu.Lock()
 				if kv.lastAppliedIndex < applyMsg.SnapshotIndex {
-					DPrintf("Server %d receives a snapshot till index %d\n", kv.me, applyMsg.SnapshotIndex)
+					// DPrintf("Server %d receives a snapshot till index %d\n", kv.me, applyMsg.SnapshotIndex)
 					kv.applySnapshot(applyMsg.Snapshot)
 					// server receiving snapshot must be a follower/crashed leader so no need to reply
 				}
@@ -366,13 +350,25 @@ func (kv *ShardKV) applier() {
 // long running poller goroutine
 //
 func (kv *ShardKV) poller() {
+
 	for !kv.killed() {
-		_, isLeader := kv.rf.GetState()
-		if isLeader && kv.serving {
+		if kv.sendEmpty() {
+			break
+		}
+		time.Sleep(INTERVAL)
+	}
+
+	for !kv.killed() {
+		if _, isLeader := kv.rf.GetState(); isLeader {
 			// ask for newer config
-			if newConfig := kv.ctrl.Query(kv.config.Num + 1); newConfig.Num > kv.config.Num {
+			kv.mu.Lock()
+			configNum := kv.config.Num
+			kv.mu.Unlock()
+			if newConfig := kv.ctrl.Query(configNum + 1); newConfig.Num > configNum {
 				// start config transition
+				DPrintf("Group %d server %d detects new config %+v\n", kv.gid, kv.me, newConfig)
 				kv.startConfigTransition(newConfig)
+				// kv.changeConfig(newConfig)
 			}
 		}
 		time.Sleep(POLL)
@@ -431,7 +427,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	if gStart.IsZero() {
 		gStart = time.Now()
 	}
-	DPrintf("Server %d launched!\n", me)
+	DPrintf("Group %d server %d launched!\n", gid, me)
 	labgob.Register(Op{})
 
 	kv := new(ShardKV)
@@ -450,15 +446,15 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.persister = persister
 
-	// initialize config
+	// initialize group state
 	kv.config = shardctrler.Config{}
+	kv.state = Serving
 
 	// initialize db
 	kv.db = make(map[int]Shard)
 	for i := 0; i < shardctrler.NShards; i++ {
 		kv.db[i] = Shard{
-			Num: i,
-			// mu:   sync.Mutex{},
+			Num:  i,
 			Data: make(map[string]string),
 		}
 	}
@@ -471,6 +467,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	go kv.applier()
 	go kv.poller()
-	kv.serving = true
+
 	return kv
 }

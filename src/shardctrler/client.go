@@ -94,3 +94,13 @@ func (ck *Clerk) Move(shard int, gid int) {
 	}
 	ck.sendCommandRequest(args)
 }
+
+// interface for communication between replica groups and ctrl for 2pc
+func (ck *Clerk) Ready(configNum int, gid int) {
+	args := &CommandArgs{
+		Type:      Ready,
+		ConfigNum: configNum,
+		Group:     gid,
+	}
+	ck.sendCommandRequest(args)
+}

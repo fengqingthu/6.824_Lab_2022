@@ -16,7 +16,7 @@ const TIMEOUT = 500 * time.Millisecond
 
 const INTERVAL = 10 * time.Millisecond
 
-const Debug = false
+const Debug = true
 
 var gStart time.Time
 
@@ -40,6 +40,10 @@ type ShardCtrler struct {
 	sessions         map[int64]ClientRecord     // memoization for each client's last response
 	waitChs          map[int]chan *CommandReply // a map of waitChs to retrieve corresponding command after agreement
 	lastAppliedIndex int                        // last applied index of log entry
+
+	// for lab4b
+	configNum int                  // current config of groups
+	ready     map[int]map[int]bool // map configNum -> map gid->bool, need groups in both current config and proposed config to be ready
 }
 
 type Op struct {
@@ -52,25 +56,32 @@ type Op struct {
 	Shard     int              // for move: the shard to be assigned
 	GID       int              // for move: the specified GID
 	Num       int              // for query: desired config number
+	ConfigNum int              // for ready: proposed configNum
+	Group     int              // for ready: the gid of ready group
 }
 
 // merge read/write RPCs to one
 // RPC handler for client's command
 func (sc *ShardCtrler) CommandRequest(args *CommandArgs, reply *CommandReply) {
 	sc.mu.Lock()
-	defer DPrintf("Server %d responded client %d's request %d: %+v\n", sc.me, args.ClientID, args.RequestID, reply)
+	// defer DPrintf("Server %d responded client %d's request %d: %+v\n", sc.me, args.ClientID, args.RequestID, reply)
 
-	DPrintf("Server %d received request: %+v\n", sc.me, args)
+	// DPrintf("Server %d received request: %+v\n", sc.me, args)
 	// check for duplicates
-	if args.Type != Query && sc.checkDuplicate(args.ClientID, args.RequestID) {
+	if args.Type != Query && args.Type != Ready && sc.checkDuplicate(args.ClientID, args.RequestID) {
 		reply.Err = sc.sessions[args.ClientID].LastResponse.Err
 		sc.mu.Unlock()
 		return
 	}
+	// check outdated config transition
+	// if args.Type == Ready && args.ConfigNum != sc.configNum+1 {
+	// 	sc.mu.Unlock()
+	// 	return
+	// }
 	sc.mu.Unlock()
 
 	// send command to raft for agreement
-	index, _, isLeader := sc.rf.Start(Op{args.ClientID, args.RequestID, args.Type, args.Servers, args.GIDs, args.Shard, args.GID, args.Num})
+	index, _, isLeader := sc.rf.Start(Op{args.ClientID, args.RequestID, args.Type, args.Servers, args.GIDs, args.Shard, args.GID, args.Num, args.ConfigNum, args.Group})
 	if index == -1 || !isLeader {
 		reply.WrongLeader = true
 		return
@@ -83,8 +94,30 @@ func (sc *ShardCtrler) CommandRequest(args *CommandArgs, reply *CommandReply) {
 
 	select {
 	case agreement := <-waitCh:
-		reply.Err = agreement.Err
-		reply.Config = agreement.Config
+		if args.Type == Ready {
+			// wait until all groups are ready, return OK
+			DPrintf("Ctrl commits config %d ready from group %d\n", args.ConfigNum, args.Group)
+			for {
+				sc.mu.Lock()
+				allReady := true
+				for _, ready := range sc.ready[args.ConfigNum] {
+					if !ready {
+						allReady = false
+						break
+					}
+				}
+				if allReady {
+					reply.Err = OK
+					sc.mu.Unlock()
+					break
+				}
+				sc.mu.Unlock()
+				time.Sleep(INTERVAL)
+			}
+		} else {
+			reply.Err = agreement.Err
+			reply.Config = agreement.Config
+		}
 
 	case <-time.NewTimer(TIMEOUT).C:
 		reply.Err = ErrTimeout
@@ -176,6 +209,15 @@ func (sc *ShardCtrler) applyCommand(op Op) *CommandReply {
 		}
 		sc.configs = append(sc.configs, newConfig)
 
+		// for lab4b, initialize new ready map
+		sc.ready[newConfig.Num] = make(map[int]bool)
+		for group := range currentConfig.Groups {
+			sc.ready[newConfig.Num][group] = false
+		}
+		for group := range newConfig.Groups {
+			sc.ready[newConfig.Num][group] = false
+		}
+
 	case opType == Move:
 		// handle move
 		currentConfig = sc.configs[len(sc.configs)-1]
@@ -193,6 +235,20 @@ func (sc *ShardCtrler) applyCommand(op Op) *CommandReply {
 			Groups: currentConfig.Groups,
 		}
 		sc.configs = append(sc.configs, newConfig)
+
+		// for lab4b, initialize new ready map
+		sc.ready[newConfig.Num] = make(map[int]bool)
+		for group := range currentConfig.Groups {
+			sc.ready[newConfig.Num][group] = false
+		}
+		for group := range newConfig.Groups {
+			sc.ready[newConfig.Num][group] = false
+		}
+
+	// for lab4b
+	case opType == Ready:
+		// handle ready
+		sc.ready[op.ConfigNum][op.Group] = true
 	}
 	return reply
 }
@@ -289,12 +345,12 @@ func (sc *ShardCtrler) applier() {
 
 				var reply *CommandReply
 				// check for duplicates before apply to state machine
-				if op.Type != Query && sc.checkDuplicate(op.ClientID, op.RequestID) {
+				if op.Type != Query && op.Type != Ready && sc.checkDuplicate(op.ClientID, op.RequestID) {
 					reply = sc.sessions[op.ClientID].LastResponse
 				} else {
 					reply = sc.applyCommand(op)
 					// DPrintf("Server %d applied command %+v\n", kv.me, command)
-					if op.Type != Query {
+					if op.Type != Query && op.Type != Ready {
 						sc.sessions[op.ClientID] = ClientRecord{op.RequestID, reply}
 					}
 				}
@@ -345,7 +401,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	if gStart.IsZero() {
 		gStart = time.Now()
 	}
-	DPrintf("Server %d launched!\n", me)
+	DPrintf("Ctrl server %d launched!\n", me)
 
 	sc.configs = make([]Config, 1)
 	sc.configs[0].Groups = map[int][]string{}
@@ -357,6 +413,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	// Your code here.
 	sc.waitChs = make(map[int]chan *CommandReply)
 	sc.sessions = make(map[int64]ClientRecord)
+
+	sc.configNum = 0
+	sc.ready = make(map[int]map[int]bool)
 
 	go sc.applier()
 	return sc
