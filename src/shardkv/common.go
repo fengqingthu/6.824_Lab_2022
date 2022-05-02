@@ -29,8 +29,9 @@ type ClientRecord struct {
 }
 
 type Shard struct {
-	Num  int
-	Data map[string]string
+	Num      int
+	Sessions map[int64]ClientRecord // each shard maintains its own sessions for handling duplicates
+	Data     map[string]string
 }
 
 const (

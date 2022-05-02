@@ -350,25 +350,31 @@ func (kv *ShardKV) applier() {
 // long running poller goroutine
 //
 func (kv *ShardKV) poller() {
-
+	// make sure raft applied all its logs before starting polling
 	for !kv.killed() {
 		if kv.sendEmpty() {
 			break
 		}
 		time.Sleep(INTERVAL)
 	}
-
+	DPrintf("Group %d sendEmpty returned!\n", kv.gid)
 	for !kv.killed() {
 		if _, isLeader := kv.rf.GetState(); isLeader {
 			// ask for newer config
 			kv.mu.Lock()
-			configNum := kv.config.Num
+			var configNum int
+			// if already in ready state, trying to progress to current config
+			if kv.state == Ready {
+				configNum = kv.config.Num - 1
+			} else {
+				configNum = kv.config.Num
+			}
 			kv.mu.Unlock()
 			if newConfig := kv.ctrl.Query(configNum + 1); newConfig.Num > configNum {
 				// start config transition
-				DPrintf("Group %d server %d detects new config %+v\n", kv.gid, kv.me, newConfig)
+				DPrintf("Group %d current config:%d\n", kv.gid, configNum)
+				DPrintf("Group %d server %d (%v, config: %d) detects new config %+v\n", kv.gid, kv.me, kv.state, kv.config.Num, newConfig)
 				kv.startConfigTransition(newConfig)
-				// kv.changeConfig(newConfig)
 			}
 		}
 		time.Sleep(POLL)
