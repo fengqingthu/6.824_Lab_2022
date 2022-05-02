@@ -1,6 +1,8 @@
 package shardkv
 
-import "6.824/shardctrler"
+import (
+	"6.824/shardctrler"
+)
 
 //
 // Sharded key/value server.
@@ -13,8 +15,8 @@ import "6.824/shardctrler"
 
 const (
 	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
+	ErrNotServing  = "ErrNotServing"
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrTimeout     = "ErrTimeout"
 )
@@ -27,10 +29,17 @@ type ClientRecord struct {
 }
 
 type Shard struct {
-	Num int
-	// mu   sync.RWMutex
+	Num  int
 	Data map[string]string
 }
+
+const (
+	Serving = "Serving"
+	Prepare = "Prepare"
+	Ready   = "Ready"
+)
+
+type State string
 
 type Op struct {
 	// Your definitions here.
@@ -49,7 +58,10 @@ type Op struct {
 	// for internal command - change config state
 	InternalID int // the serial ID for internal commands
 	Config     shardctrler.Config
-	Serving    bool
+	State      State
+
+	// for internal command - change db
+	DB map[int]Shard
 }
 
 // use an integrated RPC args & replys instead
@@ -64,4 +76,14 @@ type CommandArgs struct {
 type CommandReply struct {
 	Err   Err
 	Value string
+}
+
+type PullShardsArgs struct {
+	ConfigNum int
+	Shards    []int
+}
+
+type PullShardsReply struct {
+	Shards []Shard
+	Err    Err
 }
