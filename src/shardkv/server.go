@@ -19,7 +19,7 @@ const POLL = 50 * time.Millisecond
 
 const INTERVAL = 10 * time.Millisecond
 
-const Debug = true
+const Debug = false
 
 var gStart time.Time
 
@@ -47,13 +47,11 @@ type ShardKV struct {
 	persister *raft.Persister    // the persister of the kv server
 
 	// persistent state
-	db                  map[int]Shard          // mapping shardNum to shards
-	sessions            map[int64]ClientRecord // memoization for each client's last response
-	lastAppliedIndex    int                    // last applied index of log entry
-	internalID          int                    // serial number for internal commands of this group
-	lastAppliedInternal int
-	config              shardctrler.Config // current config
-	state               State              // serving, prepare or ready
+	db               map[int]Shard      // mapping shardNum to shards
+	lastAppliedIndex int                // last applied index of log entry
+	appliedInternal  map[int64]bool     // a hash table storing applied internalIDs
+	config           shardctrler.Config // current config
+	state            State              // serving, prepare or ready
 
 	// volatile state
 	dead    int32                      // set by Kill()
@@ -83,8 +81,8 @@ func (kv *ShardKV) CommandRequest(args *CommandArgs, reply *CommandReply) {
 	defer DPrintf("Group %d responded client %d's request %d: %+v\n", kv.gid, args.ClientID, args.RequestID, reply)
 
 	// check for duplicates
-	if args.Op != "Get" && kv.checkDuplicate(args.ClientID, args.RequestID) {
-		reply.Err = kv.sessions[args.ClientID].LastResponse.Err
+	if args.Op != "Get" && kv.checkDuplicate(args.Key, args.ClientID, args.RequestID) {
+		reply.Err = kv.db[key2shard(args.Key)].Sessions[args.ClientID].LastResponse.Err
 		kv.mu.Unlock()
 		return
 	}
@@ -131,8 +129,8 @@ func (kv *ShardKV) checkShard(key string) bool {
 }
 
 // method to check duplicated CommandRequest
-func (kv *ShardKV) checkDuplicate(clientID int64, requestID int) bool {
-	clientRecord, ok := kv.sessions[clientID]
+func (kv *ShardKV) checkDuplicate(key string, clientID int64, requestID int) bool {
+	clientRecord, ok := kv.db[key2shard(key)].Sessions[clientID]
 	return ok && requestID <= clientRecord.RequestID
 }
 
@@ -194,10 +192,8 @@ func (kv *ShardKV) takeSnapshot(index int) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.db)
-	e.Encode(kv.sessions)
 	e.Encode(kv.lastAppliedIndex)
-	e.Encode(kv.lastAppliedInternal)
-	e.Encode(kv.internalID)
+	e.Encode(kv.appliedInternal)
 	e.Encode(kv.config)
 	e.Encode(kv.state)
 	data := w.Bytes()
@@ -213,30 +209,24 @@ func (kv *ShardKV) applySnapshot(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var DB map[int]Shard
-	var Sessions map[int64]ClientRecord
 	var LastAppliedIndex int
-	var LastAppliedInternal int
-	var InternalID int
+	var AppliedInternal map[int64]bool
 	var Config shardctrler.Config
 	var State State
 
 	// decode, print error but do not panic
 	err1 := d.Decode(&DB)
-	err2 := d.Decode(&Sessions)
-	err3 := d.Decode(&LastAppliedIndex)
-	err4 := d.Decode(&LastAppliedInternal)
-	err5 := d.Decode(&InternalID)
-	err6 := d.Decode(&Config)
-	err7 := d.Decode(&State)
-	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil || err7 != nil {
-		DPrintf("Decoding error:%v, %v\n", err1, err2)
+	err2 := d.Decode(&LastAppliedIndex)
+	err3 := d.Decode(&AppliedInternal)
+	err4 := d.Decode(&Config)
+	err5 := d.Decode(&State)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil {
+		DPrintf("Decoding error:%v, %v\n")
 	} else {
 		// apply
 		kv.db = DB
-		kv.sessions = Sessions
 		kv.lastAppliedIndex = LastAppliedIndex
-		kv.lastAppliedInternal = LastAppliedInternal
-		kv.internalID = InternalID
+		kv.appliedInternal = AppliedInternal
 		kv.config = Config
 		kv.state = State
 	}
@@ -246,7 +236,7 @@ func (kv *ShardKV) applySnapshot(data []byte) {
 // For lab 4b
 //
 
-// method to start config transition
+// method to start config transition under 2pc protocol
 func (kv *ShardKV) startConfigTransition(newConfig shardctrler.Config) {
 	// stop serving
 	if kv.state != Ready {
@@ -256,14 +246,8 @@ func (kv *ShardKV) startConfigTransition(newConfig shardctrler.Config) {
 		// pull shards to newDB
 		newDB := kv.pullShards(newConfig)
 
-		// change group state
-		if !kv.changeDB(newDB) {
-			return
-		}
-		if !kv.changeConfig(newConfig) {
-			return
-		}
-		if !kv.changeState(Ready) {
+		// change group state - have to be atomic
+		if !kv.prepare(newConfig, newDB) {
 			return
 		}
 	}
@@ -304,22 +288,30 @@ func (kv *ShardKV) applier() {
 				kv.lastAppliedIndex = applyMsg.CommandIndex
 
 				var reply *CommandReply
-				// check for duplicates before apply to state machine
-				if op.Command == "Request" && op.Type != "Get" && kv.checkDuplicate(op.ClientID, op.RequestID) {
-					reply = kv.sessions[op.ClientID].LastResponse
-				} else {
-					switch op.Command {
-					case "Request":
+
+				switch op.Command {
+				case "Request":
+					// check for duplicates before apply to state machine
+					if op.Type != "Get" && kv.checkDuplicate(op.Key, op.ClientID, op.RequestID) {
+						reply = kv.db[key2shard(op.Key)].Sessions[op.ClientID].LastResponse
+					} else {
 						reply = kv.applyCommandRequest(op)
 						if op.Type == "Put" || op.Type == "Append" {
-							kv.sessions[op.ClientID] = ClientRecord{op.RequestID, reply}
+							kv.db[key2shard(op.Key)].Sessions[op.ClientID] = ClientRecord{op.RequestID, reply}
 						}
-					case "Internal":
-						kv.applyCommandInternal(op)
-						kv.lastAppliedInternal = op.InternalID
 					}
-					// DPrintf("Server %d applied command %+v\n", kv.me, command)
+
+				case "Internal":
+					// check for duplicates before apply to state machine
+					if applied, ok := kv.appliedInternal[op.InternalID]; applied && ok {
+						kv.mu.Unlock()
+						continue
+					}
+					kv.applyCommandInternal(op)
+					// mark the internal command applied
+					kv.appliedInternal[op.InternalID] = true
 				}
+				// DPrintf("Server %d applied command %+v\n", kv.me, command)
 
 				// after applying command, compare if raft is oversized
 				if kv.needSnapshot() {
@@ -357,7 +349,7 @@ func (kv *ShardKV) poller() {
 		}
 		time.Sleep(INTERVAL)
 	}
-	DPrintf("Group %d sendEmpty returned!\n", kv.gid)
+	// DPrintf("Group %d sendEmpty finished!\n", kv.gid)
 	for !kv.killed() {
 		if _, isLeader := kv.rf.GetState(); isLeader {
 			// ask for newer config
@@ -372,7 +364,7 @@ func (kv *ShardKV) poller() {
 			kv.mu.Unlock()
 			if newConfig := kv.ctrl.Query(configNum + 1); newConfig.Num > configNum {
 				// start config transition
-				DPrintf("Group %d current config:%d\n", kv.gid, configNum)
+				// DPrintf("Group %d current config:%d\n", kv.gid, configNum)
 				DPrintf("Group %d server %d (%v, config: %d) detects new config %+v\n", kv.gid, kv.me, kv.state, kv.config.Num, newConfig)
 				kv.startConfigTransition(newConfig)
 			}
@@ -455,18 +447,19 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// initialize group state
 	kv.config = shardctrler.Config{}
 	kv.state = Serving
+	kv.appliedInternal = make(map[int64]bool)
 
 	// initialize db
 	kv.db = make(map[int]Shard)
 	for i := 0; i < shardctrler.NShards; i++ {
 		kv.db[i] = Shard{
-			Num:  i,
-			Data: make(map[string]string),
+			Num:      i,
+			Sessions: make(map[int64]ClientRecord),
+			Data:     make(map[string]string),
 		}
 	}
 
 	kv.waitChs = make(map[int]chan *CommandReply)
-	kv.sessions = make(map[int64]ClientRecord)
 
 	// restore snapshot
 	kv.applySnapshot(kv.persister.ReadSnapshot())

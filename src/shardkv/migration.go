@@ -11,8 +11,14 @@ func (kv *ShardKV) PullShards(args *PullShardsArgs, reply *PullShardsReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	// if outdated, ignore
-	if args.ConfigNum > kv.config.Num+1 {
+	// if the group does not have the shards for the required config
+	var configNum int
+	if kv.state == Ready {
+		configNum = kv.config.Num - 1
+	} else {
+		configNum = kv.config.Num
+	}
+	if args.ConfigNum > configNum+1 {
 		return
 	}
 
@@ -100,11 +106,15 @@ func copyDB(db map[int]Shard) map[int]Shard {
 // helper function to make a deep copy of shard
 func copyShard(shard Shard) Shard {
 	cp := Shard{
-		Num:  shard.Num,
-		Data: make(map[string]string),
+		Num:      shard.Num,
+		Sessions: make(map[int64]ClientRecord),
+		Data:     make(map[string]string),
 	}
 	for key, value := range shard.Data {
 		cp.Data[key] = value
+	}
+	for key, value := range shard.Sessions {
+		cp.Sessions[key] = value
 	}
 	return cp
 }
