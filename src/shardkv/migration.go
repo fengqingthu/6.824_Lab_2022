@@ -36,7 +36,7 @@ func (kv *ShardKV) PullShards(args *PullShardsArgs, reply *PullShardsReply) {
 }
 
 // method to pull shards from other groups, return a new db
-func (kv *ShardKV) pullShards(newConfig shardctrler.Config) map[int]Shard {
+func (kv *ShardKV) pullShards(newConfig shardctrler.Config) *map[int]Shard {
 	kv.mu.Lock()
 	oldConfig := kv.config
 
@@ -91,7 +91,7 @@ func (kv *ShardKV) pullShards(newConfig shardctrler.Config) map[int]Shard {
 		}
 	}
 	wg.Wait()
-	return newDB
+	return &newDB
 }
 
 // helper function to make a deep copy of db

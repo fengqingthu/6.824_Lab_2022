@@ -244,7 +244,7 @@ func (kv *ShardKV) startConfigTransition(newConfig shardctrler.Config) {
 			return
 		}
 		// pull shards to newDB
-		newDB := kv.pullShards(newConfig)
+		newDB := *kv.pullShards(newConfig)
 
 		// change group state - have to be atomic
 		if !kv.prepare(newConfig, newDB) {

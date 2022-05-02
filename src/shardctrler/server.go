@@ -97,7 +97,6 @@ func (sc *ShardCtrler) CommandRequest(args *CommandArgs, reply *CommandReply) {
 
 			for {
 				sc.mu.Lock()
-				// DPrintf("%v\n", sc.ready[args.ConfigNum])
 				allReady := true
 				for _, ready := range sc.ready[args.ConfigNum] {
 					if !ready {
@@ -210,11 +209,6 @@ func (sc *ShardCtrler) applyCommand(op Op) *CommandReply {
 
 		// for lab4b, initialize new ready map
 		sc.ready[newConfig.Num] = make(map[int]bool)
-		// for _, config := range sc.configs {
-		// 	for group := range config.Groups {
-		// 		sc.ready[newConfig.Num][group] = false
-		// 	}
-		// }
 		for group := range currentConfig.Groups {
 			sc.ready[newConfig.Num][group] = false
 		}
@@ -245,11 +239,6 @@ func (sc *ShardCtrler) applyCommand(op Op) *CommandReply {
 
 		// for lab4b, initialize new ready map
 		sc.ready[newConfig.Num] = make(map[int]bool)
-		// for _, config := range sc.configs {
-		// 	for group := range config.Groups {
-		// 		sc.ready[newConfig.Num][group] = false
-		// 	}
-		// }
 		for group := range currentConfig.Groups {
 			sc.ready[newConfig.Num][group] = false
 		}
