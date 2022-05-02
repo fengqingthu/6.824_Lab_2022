@@ -57,7 +57,7 @@ type Op struct {
 	RequestID int
 
 	// for internal command - change config state
-	InternalID int // the serial ID for internal commands
+	InternalID int64 // uuid for internal commands
 	Config     shardctrler.Config
 	State      State
 

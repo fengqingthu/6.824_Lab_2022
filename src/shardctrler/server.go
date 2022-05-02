@@ -16,7 +16,7 @@ const TIMEOUT = 500 * time.Millisecond
 
 const INTERVAL = 10 * time.Millisecond
 
-const Debug = true
+const Debug = false
 
 var gStart time.Time
 
@@ -42,7 +42,6 @@ type ShardCtrler struct {
 	lastAppliedIndex int                        // last applied index of log entry
 
 	// for lab4b
-	// configNum int                  // current config of groups
 	ready map[int]map[int]bool // map configNum -> map gid->bool, need groups in both current config and proposed config to be ready
 }
 
@@ -76,11 +75,6 @@ func (sc *ShardCtrler) CommandRequest(args *CommandArgs, reply *CommandReply) {
 		sc.mu.Unlock()
 		return
 	}
-	// check outdated config transition
-	// if args.Type == Ready && args.ConfigNum != sc.configNum+1 {
-	// 	sc.mu.Unlock()
-	// 	return
-	// }
 	sc.mu.Unlock()
 
 	// send command to raft for agreement
@@ -227,6 +221,9 @@ func (sc *ShardCtrler) applyCommand(op Op) *CommandReply {
 		for group := range newConfig.Groups {
 			sc.ready[newConfig.Num][group] = false
 		}
+		if _, isLeader := sc.rf.GetState(); isLeader {
+			DPrintf("Ctrl created new config: %+v\n", newConfig)
+		}
 
 	case opType == Move:
 		// handle move
@@ -258,6 +255,9 @@ func (sc *ShardCtrler) applyCommand(op Op) *CommandReply {
 		}
 		for group := range newConfig.Groups {
 			sc.ready[newConfig.Num][group] = false
+		}
+		if _, isLeader := sc.rf.GetState(); isLeader {
+			DPrintf("Ctrl created new config: %+v\n", newConfig)
 		}
 
 	// for lab4b

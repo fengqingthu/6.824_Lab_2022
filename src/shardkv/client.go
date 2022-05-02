@@ -32,6 +32,7 @@ func key2shard(key string) int {
 	return shard
 }
 
+// method to generate uuid
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
 	bigx, _ := rand.Int(rand.Reader, max)
